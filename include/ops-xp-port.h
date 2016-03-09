@@ -26,8 +26,8 @@
 #include <stdint.h>
 #include <netinet/ether.h>
 
-#include "openXpsXpsTypes.h"
-#include "openXpsXpsEnums.h"
+#include "openXpsTypes.h"
+#include "openXpsEnums.h"
 
 struct netdev_xpliant;
 

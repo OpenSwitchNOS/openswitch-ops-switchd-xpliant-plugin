@@ -40,7 +40,7 @@
 #include "poll-loop.h"
 #include "fatal-signal.h"
 #include "ops-xp-util.h"
-#include "openXpSalInterface.h"
+#include "openXpsSalInterface.h"
 #include "openXpsPacketDrv.h"
 #include "openXpsMac.h"
 #include "openXpsPort.h"
@@ -189,10 +189,6 @@ ops_xp_dev_init(struct xpliant_dev * const dev, void *aux)
                 dev->id, ret);
         goto error;
     }
-
-    VLOG_INFO("XPliant CPU IF type is %s",
-              (dev->cpu_port_type == XP_DMA) ? "XP_DMA" :
-              ((dev->cpu_port_type == XP_ETHER) ? "XP_ETHER" : "XP_NETDEV_DMA"));
 
     ret = xpsPacketDriverRxConfigModeGet(dev->id, &dev->rx_mode);
     if (ret != XP_NO_ERR) {
