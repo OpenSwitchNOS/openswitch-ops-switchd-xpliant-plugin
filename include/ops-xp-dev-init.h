@@ -25,35 +25,15 @@
 
 #include "openXpsInit.h"
 
-#define XP_SDK_DEV_TYPE_SIM         (0)
-#define XP_SDK_DEV_TYPE_AS7512      (1)
-
-#define OPS_XPPLATFORM              XP_SDK_DEV_TYPE_SIM
-#define OPS_XPPLATFORM_NAME         "xp-sim"
-
-#ifdef OPS_AS7512
-#undef OPS_XPPLATFORM
-#undef OPS_XPPLATFORM_NAME
-#define OPS_XPPLATFORM              XP_SDK_DEV_TYPE_AS7512
-#define OPS_XPPLATFORM_NAME         "as7512"
-#endif
-
-typedef struct opsXpParam
-{
-    xpInitType_t initType;
-} opsXpParam_t;
-
-extern xpsDevConfigStruct_t defaultConfig;
-
 int ops_xp_sdk_init(xpInitType_t initType);
 
 XP_STATUS ops_xp_sdk_dev_add(xpsDevice_t devId, xpInitType_t initType,
                              xpsDevConfigStruct_t *devConfig);
 
+#ifdef OPS_XP_SIM
 XP_STATUS ops_xp_sdk_dev_remove(xpsDevice_t devId);
-XP_STATUS ops_xp_dev_config_init(uint32_t dev_type,
-                                 xpsDevConfigStruct_t *pDefaultConfig,
-                                 XP_PROFILE_TYPE profileType);
+#endif
+
 XP_STATUS ops_xp_dev_config(xpsDevice_t deviceId, void *arg);
 
 #endif /* ops-xp-dev-init.h */

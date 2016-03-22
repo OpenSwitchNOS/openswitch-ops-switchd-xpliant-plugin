@@ -38,7 +38,6 @@
 #define XP_DEV_EVENT_MODE               XP_DEV_EVENT_MODE_POLL
 
 #define XP_MAX_CHAN_PER_MAC             XP_PORTS_PER_PORT_GROUP
-#define XP_DEFAULT_MAC_MODE             MAC_MODE_1X40GB
 
 #define XP_LOCK() \
         ops_xp_mutex_lock();

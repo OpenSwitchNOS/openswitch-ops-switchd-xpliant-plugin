@@ -29,11 +29,6 @@
 #include "ops-xp-dev.h"
 #include "ops-xp-dev-init.h"
 #include "ops-xp-routing.h"
-
-#ifdef OPS_XP_SIM
-#include "xpWmIpcSrv.h"
-#endif
-
 #include "ops-xp-netdev.h"
 #include <openvswitch/vlog.h>
 #include "util.h"
@@ -49,6 +44,26 @@
 #include "dummy.h"
 
 VLOG_DEFINE_THIS_MODULE(xp_dev);
+
+#ifdef OPS_XP_SIM
+typedef XP_STATUS (*xpSimulatorInitFuncPtr_t)(xpsDevice_t devId, void *arg);
+typedef XP_STATUS (*xpSimulatorDeInitFuncPtr_t)(xpsDevice_t devId);
+
+typedef enum
+{
+    XP_SIMULATOR_INIT_STAGE_0 = 0,  /*!< Called after establishing connection to sim */
+    XP_SIMULATOR_INIT_STAGE_1,     /*!< Called after stage 0 */
+    XP_SIMULATOR_INIT_STAGE_2,     /*!< Called after stage 1 */
+    XP_SIMULATOR_INIT_STAGE_3,     /*!< Called after stage 2 */
+    XP_SIMULATOR_INIT_STAGE_MAX    /*!< Number of stages */
+} xpSimulatorInitStage_t;
+
+XP_STATUS xpWmIpcSrvInit(int, int);
+XP_STATUS xpWmIpcSrvUpdate(void *);
+XP_STATUS xpWmIpcSrvDeviceInitRegister(xpSimulatorInitStage_t,
+                                       xpSimulatorInitFuncPtr_t);
+XP_STATUS xpWmIpcSrvDeviceDeInitRegister(xpSimulatorDeInitFuncPtr_t);
+#endif
 
 static struct ovs_mutex xpdev_mutex = OVS_MUTEX_INITIALIZER;
 
@@ -328,15 +343,11 @@ ops_xp_dev_send(xpsDevice_t xp_dev_id, xpsInterfaceId_t dst_if_id,
 
     pktInfo.bufSize = pkt_size;
 
-#ifdef OPS_XP_SIM
     if (memcmp(buff, eth_addr_lacp.ea, ETH_ADDR_LEN) == 0) {
         send_to_egress = false;
     } else {
         send_to_egress = true;
     }
-#else
-    send_to_egress = true;
-#endif
 
     /* Add Tx header to the packet. */
     xpsPacketDriverCreateHeader(xp_dev_id, &pktInfo, src_vif,
@@ -453,14 +464,13 @@ pkt_available_handle(xpsDevice_t intrSrcDev)
 
 #ifdef OPS_XP_SIM
 static void *
-ipc_handler(void *arg OVS_UNUSED)
+ipc_handler(void *arg)
 {
     XP_STATUS status = XP_NO_ERR;
-    xpWmIpcSrvParam_t *param = (xpWmIpcSrvParam_t *)arg;
 
     for (;;) {
         /* Handle HW/WM incoming requests. */
-        status = xpWmIpcSrvUpdate(*param);
+        status = xpWmIpcSrvUpdate(arg);
         if (status != XP_NO_ERR)
         {
             VLOG_ERR("XDK IPC update failed. RC = %u", status);
@@ -548,12 +558,10 @@ ops_xp_dev_srv_init(void)
     static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
 
     if (ovsthread_once_start(&once)) {
-        static opsXpParam_t param;
+        static xpInitType_t initType = INIT_COLD;
 
         /* Create folder to register new XP devices */
         locker_init();
-
-        param.initType = INIT_COLD;
 
         /* Register dummy plugins */
         dummy_enable(false);
@@ -562,24 +570,15 @@ ops_xp_dev_srv_init(void)
         host_if_type_init();
 
         /* Perform XDK-specific initialization */
-        status = ops_xp_sdk_init(param.initType);
+        status = ops_xp_sdk_init(initType);
         if (status != XP_NO_ERR) {
             VLOG_ERR("Failed to initialize XDK. RC = %u", status);
             return EFAULT;
         }
 
-        /* Initialize configuration profile */
-        status = ops_xp_dev_config_init(OPS_XPPLATFORM, &defaultConfig,
-                                        XP_ROUTE_CENTRIC_SINGLE_PIPE_PROFILE);
-        if (status != XP_NO_ERR) {
-            VLOG_ERR("ops_xp_dev_config_init Failed.. Error #%1d\n", status);
-            return EFAULT;
-        }
-        VLOG_INFO("XP configuration profile initialized!\n");
-
 #ifdef OPS_XP_SIM
         /* Setup XDK IPC server */
-        xpWmIpcSrvDeviceInitRegister(XP_WM_IPC_SRV_INIT_STAGE_0,
+        xpWmIpcSrvDeviceInitRegister(XP_SIMULATOR_INIT_STAGE_0,
                                      ops_xp_dev_config);
         xpWmIpcSrvDeviceDeInitRegister(ops_xp_sdk_dev_remove);
 
@@ -591,11 +590,11 @@ ops_xp_dev_srv_init(void)
         }
 
         /* Handle XP devices specific background tasks */
-        ovs_thread_create("ops-xp-dev-ipc-srv", ipc_handler, &param);
+        ovs_thread_create("ops-xp-dev-ipc-srv", ipc_handler, &initType);
 #else
         xpsDevice_t deviceId = 0;
 
-        status = ops_xp_dev_config(deviceId, &param);
+        status = ops_xp_dev_config(deviceId, &initType);
         if (status != XP_NO_ERR) {
             VLOG_ERR("xp_dev_config Failed.. Error #%1d\n", status);
             return EFAULT;

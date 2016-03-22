@@ -18,9 +18,6 @@ cmake_minimum_required (VERSION 2.8)
 set (SRC_DIR src)
 set (INCL_DIR include)
 
-# Define compile flags
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu99 -Werror")
-
 ###
 ### Define sources
 ###
@@ -47,12 +44,16 @@ set (SOURCES ${SRC_DIR}/ops-xp-dev-init.c
 ###
 include(FindPkgConfig)
 pkg_check_modules(OVSCOMMON REQUIRED libovscommon)
-pkg_check_modules(XDK REQUIRED libOpenXps)
+pkg_check_modules(OPENXPS REQUIRED openXps)
+
+###
+### Define compile flags
+###
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OPENXPS_CFLAGS} -std=gnu99 -Werror")
 
 include_directories(${CMAKE_SOURCE_DIR}/${INCL_DIR}
                     ${OVSCOMMON_INCLUDE_DIRS}
-                    ${XDK_INCLUDE_DIRS}/include
-                    )
+                    ${OPENXPS_INCLUDE_DIRS})
 
 ###
 ### Create our library
@@ -60,7 +61,7 @@ include_directories(${CMAKE_SOURCE_DIR}/${INCL_DIR}
 
 add_library (ovs_xpliant_plugin SHARED ${SOURCES})
 
-target_link_libraries (ovs_xpliant_plugin ${OVSCOMMON_LIBRARIES} ${XDK_LIBRARIES})
+target_link_libraries (ovs_xpliant_plugin ${OVSCOMMON_LIBRARIES} ${OPENXPS_LIBRARIES})
 
 ###
 ### Installation

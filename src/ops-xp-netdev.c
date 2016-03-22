@@ -50,6 +50,13 @@
 
 VLOG_DEFINE_THIS_MODULE(xp_netdev);
 
+#ifdef OPS_XP_SIM
+#define XP_DEFAULT_MAC_MODE             MAC_MODE_4X10GB
+#else
+#define XP_DEFAULT_MAC_MODE             MAC_MODE_1X40GB
+#endif
+
+
 /* Temporary definition. Will be removed when functionality which allows
    retrieving number of queues is present in XDK. */
 #define XPDEV_N_QUEUES         4000
@@ -153,7 +160,7 @@ netdev_xpliant_construct(struct netdev *netdev_)
     static atomic_count next_n = ATOMIC_COUNT_INIT(0xaa550000);
     unsigned int n;
 
-    VLOG_INFO("Construct NETDEV %s.", netdev_get_name(netdev_));
+    VLOG_INFO("%s: netdev %s", __FUNCTION__, netdev_get_name(netdev_));
 
     ovs_mutex_init(&netdev->mutex);
 
@@ -200,7 +207,7 @@ netdev_xpliant_destruct(struct netdev *netdev_)
     struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
     int retval = 0;
 
-    VLOG_INFO("Destruct NETDEV %s.", netdev_get_name(netdev_));
+    VLOG_INFO("%s: netdev %s", __FUNCTION__, netdev_get_name(netdev_));
 
     ovs_mutex_lock(&xp_netdev_list_mutex);
 
@@ -923,15 +930,12 @@ netdev_xpliant_set_queue(struct netdev *netdev,
                          unsigned int queue_id, const struct smap *details)
 {
     struct netdev_xpliant *dev = netdev_xpliant_cast(netdev);
-    const char *rate_kbps_s    = smap_get(details, "rate-kbps");
-    const char *max_burst_s    = smap_get(details, "max-burst");
-    const char *priority_s     = smap_get(details, "priority");
-    uint32_t rate_kbps        = rate_kbps_s ?
-                                strtoul(rate_kbps_s, NULL, 10) : 0;
-    uint32_t max_burst        = max_burst_s ?
-                                strtoul(max_burst_s, NULL, 10) : 0;
-    uint32_t priority          = priority_s ? strtoul(priority_s, NULL, 10) : 0;
-
+    const char *rate_kbps_s = smap_get(details, "rate-kbps");
+    const char *max_burst_s = smap_get(details, "max-burst");
+    const char *priority_s = smap_get(details, "priority");
+    uint32_t rate_kbps = rate_kbps_s ? strtoul(rate_kbps_s, NULL, 10) : 0;
+    uint32_t max_burst = max_burst_s ? strtoul(max_burst_s, NULL, 10) : 0;
+    uint32_t priority = priority_s ? strtoul(priority_s, NULL, 10) : 0;
     XP_STATUS ret = XP_NO_ERR;
 
     XP_TRACE();
@@ -1124,83 +1128,80 @@ netdev_xpliant_dump_queue_stats(const struct netdev *netdev,
 }
 
 
-#define NETDEV_XPLIANT_CLASS(NAME)                          \
-{                                                           \
-    NAME,                                                   \
-    netdev_xpliant_init,                                    \
-    NULL,                       /* run */                   \
-    NULL,                       /* wait */                  \
-                                                            \
-    /* netdev Functions */                                  \
-    netdev_xpliant_alloc,                                   \
-    netdev_xpliant_construct,                               \
-    netdev_xpliant_destruct,                                \
-    netdev_xpliant_dealloc,                                 \
-    NULL,                       /* get_config */            \
-    NULL,                       /* set_config */            \
-                                                            \
-    netdev_xpliant_set_hw_intf_info,                        \
-    netdev_xpliant_set_hw_intf_config,                      \
-                                                            \
-    NULL,                       /* get_tunnel_config */     \
-                                                            \
-    NULL,                       /* build_header */          \
-    NULL,                       /* push_header */           \
-    NULL,                       /* pop_header */            \
-    NULL,                       /* get_numa_id */           \
-    NULL,                       /* set_multiq */            \
-                                                            \
-    NULL,                       /* send */                  \
-    NULL,                       /* send_wait */             \
-                                                            \
-    netdev_xpliant_set_etheraddr,                           \
-    netdev_xpliant_get_etheraddr,                           \
-    netdev_xpliant_get_mtu,                                 \
-    NULL,                       /* set_mtu */               \
-    NULL,                       /* get_ifindex */           \
-    netdev_xpliant_get_carrier,                             \
-	netdev_xpliant_get_carrier_resets,                      \
-    NULL,                       /* set_miimon_interval */   \
-    netdev_xpliant_get_stats,                               \
-    netdev_xpliant_get_features,                            \
-	NULL,                       /* set_advertisements */    \
-                                                            \
-    netdev_xpliant_set_policing,                            \
-    netdev_xpliant_get_qos_types,                           \
-    netdev_xpliant_get_qos_capabilities,                    \
-    netdev_xpliant_get_qos,                                 \
-    netdev_xpliant_set_qos,                                 \
-    netdev_xpliant_get_queue,                               \
-    netdev_xpliant_set_queue,                               \
-    netdev_xpliant_delete_queue,                            \
-    netdev_xpliant_get_queue_stats,                         \
-    netdev_xpliant_queue_dump_start,                        \
-    netdev_xpliant_queue_dump_next,                         \
-    netdev_xpliant_queue_dump_done,                         \
-    netdev_xpliant_dump_queue_stats,                        \
-                                                            \
-    NULL,                       /* get_in4 */               \
-    NULL,                       /* set_in4 */               \
-    NULL,                       /* get_in6 */               \
-    NULL,                       /* add_router */            \
-    NULL,                       /* get_next_hop */          \
-    NULL,                       /* get_status */            \
-    NULL,                       /* arp_lookup */            \
-                                                            \
-    netdev_xpliant_update_flags,                            \
-                                                            \
-    /* netdev_rxq Functions */                              \
-    NULL,                       /* rxq_alloc */             \
-    NULL,                       /* rxq_construct */         \
-    NULL,                       /* rxq_destruct */          \
-    NULL,                       /* rxq_dealloc */           \
-    NULL,                       /* rxq_recv */              \
-    NULL,                       /* rxq_wait */              \
-    NULL,                       /* rxq_drain */             \
-}
-
 const struct netdev_class netdev_xpliant_class =
-        NETDEV_XPLIANT_CLASS("system");
+{
+    "system",
+    netdev_xpliant_init,
+    NULL,                       /* run */
+    NULL,                       /* wait */
+
+    /* netdev Functions */
+    netdev_xpliant_alloc,
+    netdev_xpliant_construct,
+    netdev_xpliant_destruct,
+    netdev_xpliant_dealloc,
+    NULL,                       /* get_config */
+    NULL,                       /* set_config */
+
+    netdev_xpliant_set_hw_intf_info,
+    netdev_xpliant_set_hw_intf_config,
+
+    NULL,                       /* get_tunnel_config */
+
+    NULL,                       /* build_header */
+    NULL,                       /* push_header */
+    NULL,                       /* pop_header */
+    NULL,                       /* get_numa_id */
+    NULL,                       /* set_multiq */
+
+    NULL,                       /* send */
+    NULL,                       /* send_wait */
+
+    netdev_xpliant_set_etheraddr,
+    netdev_xpliant_get_etheraddr,
+    netdev_xpliant_get_mtu,
+    NULL,                       /* set_mtu */
+    NULL,                       /* get_ifindex */
+    netdev_xpliant_get_carrier,
+    netdev_xpliant_get_carrier_resets,
+    NULL,                       /* set_miimon_interval */
+    netdev_xpliant_get_stats,
+    netdev_xpliant_get_features,
+    NULL,                       /* set_advertisements */
+
+    netdev_xpliant_set_policing,
+    netdev_xpliant_get_qos_types,
+    netdev_xpliant_get_qos_capabilities,
+    netdev_xpliant_get_qos,
+    netdev_xpliant_set_qos,
+    netdev_xpliant_get_queue,
+    netdev_xpliant_set_queue,
+    netdev_xpliant_delete_queue,
+    netdev_xpliant_get_queue_stats,
+    netdev_xpliant_queue_dump_start,
+    netdev_xpliant_queue_dump_next,
+    netdev_xpliant_queue_dump_done,
+    netdev_xpliant_dump_queue_stats,
+
+    NULL,                       /* get_in4 */
+    NULL,                       /* set_in4 */
+    NULL,                       /* get_in6 */
+    NULL,                       /* add_router */
+    NULL,                       /* get_next_hop */
+    NULL,                       /* get_status */
+    NULL,                       /* arp_lookup */
+
+    netdev_xpliant_update_flags,
+
+    /* netdev_rxq Functions */
+    NULL,                       /* rxq_alloc */
+    NULL,                       /* rxq_construct */
+    NULL,                       /* rxq_destruct */
+    NULL,                       /* rxq_dealloc */
+    NULL,                       /* rxq_recv */
+    NULL,                       /* rxq_wait */
+    NULL,                       /* rxq_drain */
+};
 
 
 /* For most types of netdevs we open the device for each call of
@@ -1216,7 +1217,7 @@ netdev_xpliant_internal_construct(struct netdev *netdev_)
     char *name = netdev_->name;
     int err;
 
-    VLOG_INFO("Construct NETDEV %s.", netdev_get_name(netdev_));
+    VLOG_INFO("%s: netdev %s", __FUNCTION__, netdev_get_name(netdev_));
 
     ovs_mutex_init(&netdev->mutex);
 
@@ -1344,7 +1345,8 @@ netdev_xpliant_internal_update_flags(struct netdev *netdev_, enum netdev_flags o
 }
 
 static int
-netdev_xpliant_internal_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
+netdev_xpliant_internal_set_hw_intf_info(struct netdev *netdev_,
+                                         const struct smap *args)
 {
     struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
     int rc = 0;
@@ -1354,7 +1356,7 @@ netdev_xpliant_internal_set_hw_intf_info(struct netdev *netdev_, const struct sm
     const char *hw_unit = smap_get(args, INTERFACE_HW_INTF_INFO_MAP_SWITCH_UNIT);
     bool is_bridge_interface = smap_get_bool(args, INTERFACE_HW_INTF_INFO_MAP_BRIDGE, DFLT_INTERFACE_HW_INTF_INFO_MAP_BRIDGE);
 
-    VLOG_INFO("set_hw_intf_info() API call for %s.\n", netdev_get_name(netdev_));
+    VLOG_INFO("%s: netdev %s\n", __FUNCTION__, netdev_get_name(netdev_));
 
     ovs_mutex_lock(&netdev->mutex);
 
@@ -1383,11 +1385,12 @@ error:
 }
 
 static int
-netdev_xpliant_internal_set_hw_intf_config(struct netdev *netdev_, const struct smap *args)
+netdev_xpliant_internal_set_hw_intf_config(struct netdev *netdev_,
+                                           const struct smap *args)
 {
     struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
 
-    VLOG_INFO("set_hw_intf_config() API call for %s.\n", netdev_get_name(netdev_));
+    VLOG_INFO("%s: netdev %s\n", __FUNCTION__, netdev_get_name(netdev_));
 
     if (netdev->intf_initialized == false) {
         VLOG_WARN("%s: netdev interface %s is not initialized.",

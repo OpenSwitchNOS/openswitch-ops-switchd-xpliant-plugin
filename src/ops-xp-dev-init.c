@@ -34,24 +34,28 @@
 
 #include "openXpsSalInterface.h"
 #include "openXpsInit.h"
-
-#ifndef MAC
 #include "openXpsPlatformInterface.h"
-#endif /* MAC */
-
-#ifdef OPS_XP_SIM
-#include "xpWmIpcSrv.h"
-#endif
 
 #include "openXpsVlan.h"
 #include "openXpsPort.h"
 
 VLOG_DEFINE_THIS_MODULE(xp_dev_init);
 
-xpsDevConfigStruct_t defaultConfig = {
+#if defined(OPS_AS7512)
+#define OPS_XPPLATFORM_NAME         "as7512"
+#elif defined(OPS_XP_SIM)
+#define OPS_XPPLATFORM_NAME         "xp-sim"
+#endif
+
+static xpsDevConfigStruct_t defaultConfig = {
     XP_ROUTE_CENTRIC_SINGLE_PIPE_PROFILE,     // SELECT PROFILE
-    SKU_128X10,                         // default speed
+#ifdef OPS_XP_SIM
+    SKU_128X10,                               // default speed
+    XPS_DAL_WHITEMODEL
+#else
+    SKU_32X40,                                // default speed
     XPS_DAL_HARDWARE
+#endif
 };
 
 int
@@ -87,14 +91,10 @@ ops_xp_sdk_init(xpInitType_t initType)
     xpSalInit();
 
 #ifndef OPS_XP_SIM
-#ifndef MAC
-    status = xpPlatformInit(OPS_XPPLATFORM_NAME, initType, false,
-                            xasprintf("/etc/xpliant/xdk/platform/%s/ops",
-                            OPS_XPPLATFORM_NAME));
+    status = xpPlatformInit(OPS_XPPLATFORM_NAME, initType, false, NULL);
     if (status) {
         VLOG_ERR("xpPlatformInit() Failed with err: %d", status);
     }
-#endif /* MAC */
 #endif
 
     status = xpsSdkInit(RANGE_ROUTE_CENTRIC, initType);
@@ -142,35 +142,14 @@ ops_xp_sdk_dev_remove(xpsDevice_t devId)
 #endif
 
 XP_STATUS
-ops_xp_dev_config_init(uint32_t dev_type, xpsDevConfigStruct_t *pDevConfig,
-                       XP_PROFILE_TYPE profileType)
-{
-    XP_STATUS status = XP_NO_ERR;
-
-    VLOG_INFO("%s: profile type %u", __FUNCTION__, profileType);
-
-    /* Program the HW Tables for demo - using configuration data input */
-    pDevConfig->profileType = profileType;
-    pDevConfig->mode = SKU_32X40;      /* should come from init */
-    
-#ifdef OPS_XP_SIM
-    if (dev_type == XP_SDK_DEV_TYPE_SIM) {
-        pDevConfig->dalType = XPS_DAL_WHITEMODEL;
-    }
-#endif
-
-    return status;
-}
-
-XP_STATUS
 ops_xp_dev_config(xpsDevice_t deviceId, void *arg)
 {
     XP_STATUS status = XP_NO_ERR;
     struct xpliant_dev *dev = NULL;
-    opsXpParam_t *param = (opsXpParam_t *)arg;
+    xpInitType_t initType = *((xpInitType_t *)arg);
 
     /* XDK init for specific device and type */
-    status = ops_xp_sdk_dev_add(deviceId, param->initType, &defaultConfig);
+    status = ops_xp_sdk_dev_add(deviceId, initType, &defaultConfig);
     if (status != XP_NO_ERR) {
         VLOG_ERR("xpliant_sdk_dev_add Failed.. Error #%1d\n", status);
         return status;

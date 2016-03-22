@@ -112,7 +112,6 @@ struct netdev_xpliant {
     int tap_fd;
 };
 
-const struct netdev_class netdev_xpliant_class;
 struct netdev_xpliant *ops_xp_netdev_from_name(const char *name);
 struct netdev_xpliant *ops_xp_netdev_from_port_num(uint32_t dev_id,
                                                    uint32_t port_id);
