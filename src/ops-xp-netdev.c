@@ -37,6 +37,7 @@
 #include "ops-xp-dev-init.h"
 #include "ops-xp-util.h"
 #include "ops-xp-host.h"
+#include "ops-xp-vlan.h"
 #include "openXpsMac.h"
 #include "openXpsQos.h"
 #include "openXpsPolicer.h"
@@ -50,11 +51,7 @@
 
 VLOG_DEFINE_THIS_MODULE(xp_netdev);
 
-#ifdef OPS_XP_SIM
 #define XP_DEFAULT_MAC_MODE             MAC_MODE_4X10GB
-#else
-#define XP_DEFAULT_MAC_MODE             MAC_MODE_1X40GB
-#endif
 
 
 /* Temporary definition. Will be removed when functionality which allows
@@ -169,6 +166,7 @@ netdev_xpliant_construct(struct netdev *netdev_)
     netdev->port_num = XP_MAX_TOTAL_PORTS;
     netdev->xpdev = ops_xp_dev_by_id(0);
     memset(&(netdev->pcfg), 0x0, sizeof(struct port_cfg));
+    netdev->flags = 0;
     netdev->link_status = false;
     netdev->ifId = XPS_INTF_INVALID_ID;
     netdev->vif = XPS_INTF_MAP_INTFID_TO_VIF(netdev->ifId);
@@ -181,6 +179,9 @@ netdev_xpliant_construct(struct netdev *netdev_)
     netdev->is_split_parent = false;
     netdev->is_split_subport = false;
     netdev->parent_port_info = NULL;
+
+    netdev->subintf_parent_name = NULL;
+    netdev->subintf_vlan_id = 0;
 
     netdev->knet_if_id = 0;
     netdev->knet_port_filter_id = 0;
@@ -231,7 +232,11 @@ static void
 netdev_xpliant_dealloc(struct netdev *netdev_)
 {
     struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
-    XP_TRACE();
+
+    if (netdev->subintf_parent_name != NULL) {
+        free(netdev->subintf_parent_name);
+    }
+
     free(netdev);
 }
 
@@ -243,7 +248,7 @@ netdev_xpliant_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
     struct netdev_xpliant *p_netdev = NULL;
     struct xp_port_info *port_info = NULL;
     struct ether_addr ZERO_MAC = {{0}};
-    struct ether_addr *ether_mac = NULL;
+    struct ether_addr *ether_mac = &ZERO_MAC;
     int xp_err = XP_NO_ERR;
     int rc = 0;
     uint32_t dev_num;
@@ -286,8 +291,6 @@ netdev_xpliant_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
                           __FUNCTION__, ETH_ADDR_BYTES_ARGS(mac_addr),
                           netdev->port_num + 1);
                 memcpy(netdev->hwaddr, ether_mac, ETH_ADDR_LEN);
-            } else {
-                ether_mac = &ZERO_MAC;
             }
         }
 
@@ -677,7 +680,7 @@ netdev_xpliant_update_flags(struct netdev *netdev_,
     ovs_mutex_lock(&netdev->mutex);
 
     /* Get the current state to update the old flags. */
-    rc = ops_xp_port_get_enable(netdev->port_info, &state);
+    rc = ops_xp_port_get_enable(netdev, &state);
     if (!rc) {
         if (state) {
             *old_flagsp |= NETDEV_UP;
@@ -687,9 +690,9 @@ netdev_xpliant_update_flags(struct netdev *netdev_,
 
         /* Set the new state to that which is desired. */
         if (on & NETDEV_UP) {
-            rc = ops_xp_port_set_enable(netdev->port_info, true);
+            rc = ops_xp_port_set_enable(netdev, true);
         } else if (off & NETDEV_UP) {
-            rc = ops_xp_port_set_enable(netdev->port_info, false);
+            rc = ops_xp_port_set_enable(netdev, false);
         }
     }
 
@@ -1127,7 +1130,6 @@ netdev_xpliant_dump_queue_stats(const struct netdev *netdev,
     return 0;
 }
 
-
 const struct netdev_class netdev_xpliant_class =
 {
     "system",
@@ -1135,7 +1137,6 @@ const struct netdev_class netdev_xpliant_class =
     NULL,                       /* run */
     NULL,                       /* wait */
 
-    /* netdev Functions */
     netdev_xpliant_alloc,
     netdev_xpliant_construct,
     netdev_xpliant_destruct,
@@ -1193,7 +1194,6 @@ const struct netdev_class netdev_xpliant_class =
 
     netdev_xpliant_update_flags,
 
-    /* netdev_rxq Functions */
     NULL,                       /* rxq_alloc */
     NULL,                       /* rxq_construct */
     NULL,                       /* rxq_destruct */
@@ -1356,7 +1356,7 @@ netdev_xpliant_internal_set_hw_intf_info(struct netdev *netdev_,
     const char *hw_unit = smap_get(args, INTERFACE_HW_INTF_INFO_MAP_SWITCH_UNIT);
     bool is_bridge_interface = smap_get_bool(args, INTERFACE_HW_INTF_INFO_MAP_BRIDGE, DFLT_INTERFACE_HW_INTF_INFO_MAP_BRIDGE);
 
-    VLOG_INFO("%s: netdev %s\n", __FUNCTION__, netdev_get_name(netdev_));
+    VLOG_INFO("%s: netdev %s", __FUNCTION__, netdev_get_name(netdev_));
 
     ovs_mutex_lock(&netdev->mutex);
 
@@ -1473,10 +1473,278 @@ static const struct netdev_class netdev_xpliant_internal_class = {
 };
 
 void
+ops_xp_netdev_get_subintf_vlan(struct netdev *netdev_, xpsVlan_t *vlan)
+{
+    struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
+
+    VLOG_DBG("get subinterface vlan as %u\n", netdev->subintf_vlan_id);
+    *vlan = netdev->subintf_vlan_id;
+}
+
+static int
+netdev_xpliant_set_subif_config(struct netdev *netdev_, const struct smap *args)
+{
+    struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
+    struct netdev *parent = NULL;
+    struct netdev_xpliant *parent_netdev = NULL;
+    const char *parent_intf_name = NULL;
+    int vlan_id = 0;
+
+    ovs_mutex_lock(&netdev->mutex);
+    parent_intf_name = smap_get(args, "parent_intf_name");
+    vlan_id = smap_get_int(args, "vlan", 0);
+
+    if ((vlan_id != 0) && (parent_intf_name != NULL)) {
+        VLOG_DBG("netdev set_config gets info for parent interface %s, and vlan = %d",
+                 parent_intf_name, vlan_id);
+        parent = netdev_from_name(parent_intf_name);
+        if (parent != NULL) {
+            parent_netdev = netdev_xpliant_cast(parent);
+            if (parent_netdev != NULL) {
+                netdev->port_num = parent_netdev->port_num;
+                netdev->ifId = parent_netdev->ifId;
+                memcpy(netdev->hwaddr, parent_netdev->hwaddr, ETH_ADDR_LEN);
+                netdev->subintf_vlan_id = (xpsVlan_t)vlan_id;
+                netdev->flags |= NETDEV_UP;
+                if (netdev->subintf_parent_name == NULL) {
+                    netdev->subintf_parent_name = xstrdup(parent_intf_name);
+                }
+            }
+            netdev_close(parent);
+        }
+    } else {
+        netdev->flags &= ~NETDEV_UP;
+    }
+
+    ovs_mutex_unlock(&netdev->mutex);
+
+    return 0;
+}
+
+static int
+netdev_xpliant_subintf_update_flags(struct netdev *netdev_,
+                                    enum netdev_flags off,
+                                    enum netdev_flags on,
+                                    enum netdev_flags *old_flagsp)
+{
+    /*  We ignore the incoming flags as the underlying hardware responsible to
+     *  change the status of the flags is absent. Thus, we set new flags to
+     *  preconfigured values. */
+    struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
+    struct netdev *parent = NULL;
+    struct netdev_xpliant *parent_netdev = NULL;
+    enum netdev_flags parent_flagsp = 0;
+    bool state = false;
+    int rc = 0;
+
+    VLOG_DBG("%s: netdev %s", __FUNCTION__, netdev_get_name(netdev_));
+
+    if ((off | on) & ~NETDEV_UP) {
+        return EOPNOTSUPP;
+    }
+
+    /* Use subinterface netdev to get the parent netdev by name */
+    if (netdev->subintf_parent_name != NULL) {
+        parent = netdev_from_name(netdev->subintf_parent_name);
+        if (parent != NULL) {
+            parent_netdev = netdev_xpliant_cast(parent);
+
+            VLOG_DBG("%s: port_get_enable for netdev %s", __FUNCTION__,
+                     netdev_get_name(parent));
+
+            ovs_mutex_lock(&parent_netdev->mutex);
+
+            rc = ops_xp_port_get_enable(parent_netdev, &state);
+            if (!rc) {
+                if (state) {
+                    parent_flagsp |= NETDEV_UP;
+                } else {
+                    parent_flagsp &= ~NETDEV_UP;
+                }
+            }
+            /* Close netdev reference */
+            netdev_close(parent);
+            ovs_mutex_unlock(&parent_netdev->mutex);
+        }
+    }
+    VLOG_DBG("%s parent_flagsp = %d", __FUNCTION__, parent_flagsp);
+
+    ovs_mutex_lock(&netdev->mutex);
+    VLOG_DBG("%s flagsp = %d", __FUNCTION__, netdev->flags);
+    *old_flagsp = netdev->flags & parent_flagsp;
+    ovs_mutex_unlock(&netdev->mutex);
+
+    return 0;
+}
+
+static const struct netdev_class netdev_xpliant_subintf_class = {
+    "vlansubint",
+    NULL,                       /* init */
+    NULL,                       /* run */
+    NULL,                       /* wait */
+
+    netdev_xpliant_alloc,
+    netdev_xpliant_construct,
+    netdev_xpliant_destruct,
+    netdev_xpliant_dealloc,
+    NULL,                       /* get_config */
+    netdev_xpliant_set_subif_config,
+    NULL,                       /* set_hw_intf_info */
+    NULL,                       /* set_hw_intf_config */
+    NULL,                       /* get_tunnel_config */
+    NULL,                       /* build header */
+    NULL,                       /* push header */
+    NULL,                       /* pop header */
+    NULL,                       /* get_numa_id */
+    NULL,                       /* set_multiq */
+
+    NULL,                       /* send */
+    NULL,                       /* send_wait */
+
+    netdev_xpliant_set_etheraddr,
+    netdev_xpliant_get_etheraddr,
+    NULL,                       /* get_mtu */
+    NULL,                       /* set_mtu */
+    NULL,                       /* get_ifindex */
+    netdev_xpliant_get_carrier,
+    NULL,                       /* get_carrier_resets */
+    NULL,                       /* get_miimon */
+    NULL,                       /* get_stats */
+
+    NULL,                       /* get_features */
+    NULL,                       /* set_advertisements */
+
+    NULL,                       /* set_policing */
+    NULL,                       /* get_qos_types */
+    NULL,                       /* get_qos_capabilities */
+    NULL,                       /* get_qos */
+    NULL,                       /* set_qos */
+    NULL,                       /* get_queue */
+    NULL,                       /* set_queue */
+    NULL,                       /* delete_queue */
+    NULL,                       /* get_queue_stats */
+    NULL,                       /* queue_dump_start */
+    NULL,                       /* queue_dump_next */
+    NULL,                       /* queue_dump_done */
+    NULL,                       /* dump_queue_stats */
+
+    NULL,                       /* get_in4 */
+    NULL,                       /* set_in4 */
+    NULL,                       /* get_in6 */
+    NULL,                       /* add_router */
+    NULL,                       /* get_next_hop */
+    NULL,                       /* get_status */
+    NULL,                       /* arp_lookup */
+
+    netdev_xpliant_subintf_update_flags,
+
+    NULL,                       /* rxq_alloc */
+    NULL,                       /* rxq_construct */
+    NULL,                       /* rxq_destruct */
+    NULL,                       /* rxq_dealloc */
+    NULL,                       /* rxq_recv */
+    NULL,                       /* rxq_wait */
+    NULL,                       /* rxq_drain */
+};
+
+static int
+netdev_xpliant_loopback_update_flags(struct netdev *netdev_,
+                                     enum netdev_flags off,
+                                     enum netdev_flags on,
+                                     enum netdev_flags *old_flagsp)
+{
+    /*  We ignore the incoming flags as the underlying hardware responsible to
+     *  change the status of the flags is absent. Thus, we set new flags to
+     *  preconfigured values. */
+    struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
+    if ((off | on) & ~NETDEV_UP) {
+        return EOPNOTSUPP;
+    }
+
+    ovs_mutex_lock(&netdev->mutex);
+    *old_flagsp = netdev->flags;
+    ovs_mutex_unlock(&netdev->mutex);
+
+    return 0;
+}
+
+static const struct netdev_class netdev_xpliant_l3_loopback_class = {
+    "loopback",
+    NULL,                       /* init */
+    NULL,                       /* run */
+    NULL,                       /* wait */
+
+    netdev_xpliant_alloc,
+    netdev_xpliant_construct,
+    netdev_xpliant_destruct,
+    netdev_xpliant_dealloc,
+    NULL,                       /* get_config */
+    NULL,                       /* set_config */
+    NULL,                       /* set_hw_intf_info */
+    NULL,                       /* set_hw_intf_config */
+    NULL,                       /* get_tunnel_config */
+    NULL,                       /* build header */
+    NULL,                       /* push header */
+    NULL,                       /* pop header */
+    NULL,                       /* get_numa_id */
+    NULL,                       /* set_multiq */
+
+    NULL,                       /* send */
+    NULL,                       /* send_wait */
+
+    netdev_xpliant_set_etheraddr,
+    netdev_xpliant_get_etheraddr,
+    NULL,                       /* get_mtu */
+    NULL,                       /* set_mtu */
+    NULL,                       /* get_ifindex */
+    netdev_xpliant_get_carrier,
+    NULL,                       /* get_carrier_resets */
+    NULL,                       /* get_miimon */
+    NULL,                       /* get_stats */
+
+    NULL,                       /* get_features */
+    NULL,                       /* set_advertisements */
+
+    NULL,                       /* set_policing */
+    NULL,                       /* get_qos_types */
+    NULL,                       /* get_qos_capabilities */
+    NULL,                       /* get_qos */
+    NULL,                       /* set_qos */
+    NULL,                       /* get_queue */
+    NULL,                       /* set_queue */
+    NULL,                       /* delete_queue */
+    NULL,                       /* get_queue_stats */
+    NULL,                       /* queue_dump_start */
+    NULL,                       /* queue_dump_next */
+    NULL,                       /* queue_dump_done */
+    NULL,                       /* dump_queue_stats */
+
+    NULL,                       /* get_in4 */
+    NULL,                       /* set_in4 */
+    NULL,                       /* get_in6 */
+    NULL,                       /* add_router */
+    NULL,                       /* get_next_hop */
+    NULL,                       /* get_status */
+    NULL,                       /* arp_lookup */
+
+    netdev_xpliant_loopback_update_flags,
+
+    NULL,                       /* rxq_alloc */
+    NULL,                       /* rxq_construct */
+    NULL,                       /* rxq_destruct */
+    NULL,                       /* rxq_dealloc */
+    NULL,                       /* rxq_recv */
+    NULL,                       /* rxq_wait */
+    NULL,                       /* rxq_drain */
+};
+
+void
 ops_xp_netdev_register(void)
 {
     netdev_register_provider(&netdev_xpliant_class);
     netdev_register_provider(&netdev_xpliant_internal_class);
+    netdev_register_provider(&netdev_xpliant_subintf_class);
+    netdev_register_provider(&netdev_xpliant_l3_loopback_class);
 }
 
 /* Returns the netdev_xpliant with 'name' or NULL if there is none.

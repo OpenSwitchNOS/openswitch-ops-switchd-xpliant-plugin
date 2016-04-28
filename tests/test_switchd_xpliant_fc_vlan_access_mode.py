@@ -110,50 +110,13 @@ def ping(result, wrkston, dst_ip):
     retStruct = wrkston.Ping(ipAddr=dst_ip, packetCount=5)
     if result == "positive":
         if retStruct.returnCode() != 0:
-            LogOutput('error', "Failed to ping")            
+            LogOutput('error', "Failed to ping")
             assert retStruct.returnCode() == 0, "Failed to ping. TC failed"
         else:
-            LogOutput('info', "IPv4 Ping Succeded")            
+            LogOutput('info', "IPv4 Ping Succeded")
             assert retStruct.valueGet(key='packet_loss') == 0, "Some packets are lost"
     elif result == "negative": 
-        assert retStruct.returnCode() != 0, "Ping Succeded. TC failed"        
-
-
-def xp_sim_init_done(switches):
-    info("\n")
-    info("#################################################################\n")
-    info("Waiting upto 180sec for Xpliant OPS initialization completion...\n")
-    info("#################################################################\n")
-    info("\n")
-
-    init_time = 0
-    init_done = 0
-    while init_done == 0 and init_time < 180:
-        info("\rIn progress: " + str(init_time))
-        time.sleep(1)
-        init_time += 1
-
-        init_done = 1
-        
-        # For each OPS
-        for s in switches:
-            # Get switch PID
-            ops_switchd_pid = s.cmd("/bin/cat /run/openvswitch/ops-switchd.pid")
-            assert ops_switchd_pid != ""
-
-            
-            ops_switchd_pid = re.findall('\n[0-9]+',ops_switchd_pid)[0][1:]
-            xp_sim_lock_file = "/tmp/xpliant/" + ops_switchd_pid + "/dev/dev0.~lock~"
-            xp_testcmd = "/usr/bin/test -e " + xp_sim_lock_file + "; echo $?"
-
-            if re.findall('\n[0-9]+',s.cmd(xp_testcmd))[0][1:] == "1":
-                init_done = 0
-                break
-
-    assert init_done == 1
-
-    sleep(3)
-    info("\n\n")
+        assert retStruct.returnCode() != 0, "Ping Succeded. TC failed"
 
 
 
@@ -161,13 +124,13 @@ def xp_sim_init_done(switches):
 class Test_vlan_functionality:
     
     def setup_class(cls):
-        os.environ["VSI_IMAGE_NAME"] = "openswitch/xpliant"
+        pass
         
     def teardown_class(cls):
         Test_vlan_functionality.topoObj.terminate_nodes()
 
     def test_vlan_functionality_access1(self):
-        print "\n\n########################### test_vlan_functionality_access1 ###########################\n"        
+        print "\n\n########################### test_vlan_functionality_access1 ###########################\n"
         
         Test_vlan_functionality.testObj = testEnviron(topoDict=topoDict)
         Test_vlan_functionality.topoObj = \
@@ -175,14 +138,15 @@ class Test_vlan_functionality:
 
         dut01Obj = self.topoObj.deviceObjGet(device="dut01")
         switches = [dut01Obj]
-        xp_sim_init_done(switches)
         wrkston01Obj = self.topoObj.deviceObjGet(device="wrkston01")
         wrkston02Obj = self.topoObj.deviceObjGet(device="wrkston02")
         wrkston03Obj = self.topoObj.deviceObjGet(device="wrkston03")
-            
+
+        print "Applying configurations...\n"
+
         sw_port_access(dut01Obj, "1", "125")
         sw_port_access(dut01Obj, "2", "225")
-        sw_port_access(dut01Obj, "3", "125")       
+        sw_port_access(dut01Obj, "3", "125")
         
         conf_ws_intf(wrkston01Obj, wrkston01Obj.linkPortMapping['lnk01'], "1.1.1.1", "24", "1.1.1.255")
         conf_ws_intf(wrkston02Obj, wrkston02Obj.linkPortMapping['lnk02'], "1.1.1.2", "24", "1.1.1.255")
@@ -203,10 +167,11 @@ class Test_vlan_functionality:
 
         dut01Obj = self.topoObj.deviceObjGet(device="dut01")
         switches = [dut01Obj]
-        xp_sim_init_done(switches)
         wrkston01Obj = self.topoObj.deviceObjGet(device="wrkston01")
         wrkston02Obj = self.topoObj.deviceObjGet(device="wrkston02")
-              
+
+        print "Applying configurations...\n"
+
         sw_port_access(dut01Obj, "1", "125")
         sw_port_access(dut01Obj, "2", "125")
 
@@ -219,18 +184,17 @@ class Test_vlan_functionality:
         add_ws_intf_link(wrkston01Obj, wrkston01Obj.linkPortMapping['lnk01'], "125")
         conf_ws_intf(wrkston01Obj, "eth0.125", "1.1.1.1", "24", "1.1.1.255")
         set_ws_intf_up(wrkston01Obj, "eth0.125")
-        
+
         conf_ws_intf(wrkston02Obj, wrkston02Obj.linkPortMapping['lnk02'], "1.1.1.2", "24", "1.1.1.255")
-        
+
         ping("negative", wrkston01Obj, "1.1.1.2")
-        
+
         set_ws_intf_down(wrkston01Obj, "eth0.125")
         conf_ws_intf(wrkston01Obj, wrkston01Obj.linkPortMapping['lnk01'], "1.1.1.1", "24", "1.1.1.255")
-        
+
         ping("positive", wrkston01Obj, "1.1.1.2")
 
         Test_vlan_functionality.topoObj.terminate_nodes()
-     
 
     def test_vlan_functionality_access3(self):
         print "\n\n########################### test_vlan_functionality_access3 ###########################\n"
@@ -241,10 +205,11 @@ class Test_vlan_functionality:
 
         dut01Obj = self.topoObj.deviceObjGet(device="dut01")
         switches = [dut01Obj]
-        xp_sim_init_done(switches)
         wrkston01Obj = self.topoObj.deviceObjGet(device="wrkston01")
         wrkston02Obj = self.topoObj.deviceObjGet(device="wrkston02")
-           
+
+        print "Applying configurations...\n"
+
         sw_ports_trunk_125(dut01Obj, "1")
         sw_port_access(dut01Obj, "2", "125")
 
@@ -257,7 +222,7 @@ class Test_vlan_functionality:
         add_ws_intf_link(wrkston01Obj, wrkston01Obj.linkPortMapping['lnk01'], "125")
         conf_ws_intf(wrkston01Obj, "eth0.125", "1.1.1.1", "24", "1.1.1.255")
         set_ws_intf_up(wrkston01Obj, "eth0.125")
-        
+
         conf_ws_intf(wrkston02Obj, wrkston02Obj.linkPortMapping['lnk02'], "1.1.1.2", "24", "1.1.1.255")
-        
+
         ping("positive", wrkston01Obj, "1.1.1.2")

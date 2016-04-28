@@ -40,41 +40,14 @@ def checkPing(pingOutput):
 
 class xpSimTest( OpsVsiTest ):
 
-    def xp_sim_init_done(self, s):
-        ops_switchd_pid = s.ovscmd("/bin/cat /run/openvswitch/ops-switchd.pid")
-        assert ops_switchd_pid != ""
-
-        # Remove \r\n symbols
-        ops_switchd_pid = ops_switchd_pid[:-2]
-        xp_sim_lock_file = "/tmp/xpliant/" + ops_switchd_pid + "/dev/dev0.~lock~"
-        xp_testcmd = "/usr/bin/test -e " + xp_sim_lock_file + "; echo $?"
-
-        init_time = 0
-        while s.ovscmd(xp_testcmd)[0] == "1" and init_time < 180:
-            info("\rIn progress: " + str(init_time))
-            time.sleep(1)
-            init_time += 1
-        else:
-            assert s.ovscmd(xp_testcmd)[0] == "0"
-
-        sleep(3)
-        info("\n\n")
-
     def setupNet(self):
         host_opts = self.getHostOpts()
         switch_opts = self.getSwitchOpts()
-        os.environ["VSI_IMAGE_NAME"] = "openswitch/xpliant"
         vlan_topo = SingleSwitchTopo(k=2, hopts=host_opts, sopts=switch_opts)
         self.net = Mininet(vlan_topo, switch=VsiOpenSwitch,
                            host=Host, link=OpsVsiLink,
                            controller=None, build=True)
 
-        info("\n")
-        info("#################################################################\n")
-        info("Waiting upto 180sec for Xpliant OPS initialization completion...\n")
-        info("#################################################################\n")
-        info("\n")
-        self.xp_sim_init_done(self.net.switches[ 0 ])
 
     def vlan_normal(self):
         '''
