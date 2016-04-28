@@ -314,7 +314,6 @@ ops_xp_dev_send(xpsDevice_t xp_dev_id, xpsInterfaceId_t dst_if_id,
     xpVif_t src_vif;
     xpVif_t dst_vif;
     uint16_t pkt_size;
-    bool send_to_egress;
     size_t xp_tx_hdr_size;
 
     if (!buff) {
@@ -334,6 +333,7 @@ ops_xp_dev_send(xpsDevice_t xp_dev_id, xpsInterfaceId_t dst_if_id,
     pkt_size += xp_tx_hdr_size;
 
     pktInfo.buf = xmalloc(pkt_size);
+    pktInfo.bufSize = pkt_size;
 
     src_vif = XPS_INTF_MAP_INTFID_TO_VIF(cpu_if_id);
     dst_vif = XPS_INTF_MAP_INTFID_TO_VIF(dst_if_id);
@@ -341,17 +341,8 @@ ops_xp_dev_send(xpsDevice_t xp_dev_id, xpsInterfaceId_t dst_if_id,
     pktInfo.priority = priority = 0;
     priority = (priority + 1) % 64;     /* 64 - MAX_TX_QUEUES */
 
-    pktInfo.bufSize = pkt_size;
-
-    if (memcmp(buff, eth_addr_lacp.ea, ETH_ADDR_LEN) == 0) {
-        send_to_egress = false;
-    } else {
-        send_to_egress = true;
-    }
-
     /* Add Tx header to the packet. */
-    xpsPacketDriverCreateHeader(xp_dev_id, &pktInfo, src_vif,
-                                dst_vif, send_to_egress);
+    xpsPacketDriverCreateHeader(xp_dev_id, &pktInfo, src_vif, dst_vif, true);
 
     /* Copy payload of the packet. */
     memcpy(pktInfo.buf + xp_tx_hdr_size , buff, buff_size);
@@ -389,11 +380,6 @@ xp_dev_recv_handler(void *arg)
     XP_STATUS ret = XP_NO_ERR;
     uint16_t pkts_received = 0;
     struct xpPacketInfo *pkt_info;
-    struct netdev_xpliant *netdev;
-    uint32_t port_num;
-
-    uint32_t ingressVIF = 0;
-    uint64_t metadata = 0, timeStamp = 0;
 
     XP_TRACE();
 
@@ -405,7 +391,6 @@ xp_dev_recv_handler(void *arg)
 
     VLOG_INFO("Allocate buffer for CPU interface");
     pkt_info->buf = xmalloc(XP_MAX_PACKET_SIZE);
-    pkt_info->bufSize = XP_MAX_PACKET_SIZE;
 
     while (!latch_is_set(&dev->exit_latch)) {
 
@@ -422,6 +407,7 @@ xp_dev_recv_handler(void *arg)
 
         do {
             pkts_received = 1;
+            pkt_info->bufSize = XP_MAX_PACKET_SIZE;
 
             if (XP_NETDEV_DMA != dev->cpu_port_type) {
                 XP_LOCK();
@@ -620,5 +606,9 @@ cleanup_cb(void* aux)
 struct xp_port_info *
 ops_xp_dev_get_port_info(struct xpliant_dev * const xpdev, xpsPort_t port_num)
 {
-    return &xpdev->port_info[port_num];
+    if (port_num < XP_MAX_TOTAL_PORTS) {
+        return &xpdev->port_info[port_num];
+    }
+
+    return NULL;
 }

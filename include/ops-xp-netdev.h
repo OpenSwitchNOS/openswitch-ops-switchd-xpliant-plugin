@@ -68,6 +68,7 @@ struct netdev_xpliant {
 
     bool link_status; /* true - UP, false - DOWN */
     struct netdev_stats stats;
+    enum netdev_flags flags OVS_GUARDED;
     enum netdev_features features;
     /* Contains "struct queue_xpliant"s. */
     struct hmap queues;
@@ -107,6 +108,9 @@ struct netdev_xpliant {
      * Valid for split children ports only. */
     struct xp_port_info *parent_port_info;
 
+    char *subintf_parent_name;
+    xpsVlan_t subintf_vlan_id;
+
     /* For devices of class netdev_xpliant_internal_class only. */
     unsigned int ifi_flags;
     int tap_fd;
@@ -120,5 +124,6 @@ bool is_xpliant_class(const struct netdev_class *class);
 void ops_xp_netdev_register(void);
 void ops_xp_netdev_link_state_callback(struct netdev_xpliant *netdev,
                                        int link_status);
+void ops_xp_netdev_get_subintf_vlan(struct netdev *netdev, xpsVlan_t *vlan);
 
 #endif /* ops-xp-netdev.h */

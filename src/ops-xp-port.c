@@ -227,7 +227,7 @@ ops_xp_port_set_config(struct netdev_xpliant *netdev,
 
             unlink_netdev(netdev);
 
-            rc = ops_xp_port_set_enable(netdev->port_info, false);
+            rc = ops_xp_port_set_enable(netdev, false);
             if (rc) {
                 VLOG_WARN("%s: failed to disable port #%u. Err=%d",
                           __FUNCTION__, netdev->ifId, rc);
@@ -321,7 +321,7 @@ ops_xp_port_set_config(struct netdev_xpliant *netdev,
 #endif /* XP_DEV_EVENT_MODE */
             XP_UNLOCK();
 
-            rc = ops_xp_port_set_enable(netdev->port_info, true);
+            rc = ops_xp_port_set_enable(netdev, true);
             if (rc) {
                 VLOG_WARN("%s: failed to enable port #%u. Err=%d",
                           __FUNCTION__, netdev->ifId, rc);
@@ -402,22 +402,32 @@ ops_xp_port_set_config(struct netdev_xpliant *netdev,
 }
 
 int
-ops_xp_port_get_enable(struct xp_port_info *port_info, bool *enable)
+ops_xp_port_get_enable(struct netdev_xpliant *netdev, bool *enable)
 {
-    *enable = port_info->hw_enable;
-    return 0;
+    struct xp_port_info *port_info = netdev->port_info;
+
+    if (port_info) {
+        *enable = port_info->hw_enable;
+        return 0;
+    }
+
+    return EPERM;
 }
 
 int
-ops_xp_port_set_enable(struct xp_port_info *port_info, bool enable)
+ops_xp_port_set_enable(struct netdev_xpliant *netdev, bool enable)
 {
+    struct xp_port_info *port_info = netdev->port_info;
     XP_STATUS xp_rc = XP_NO_ERR;
-
-    if (port_info->hw_enable != enable) {
-        XP_LOCK();
-        xp_rc = xpsMacPortEnable(port_info->id, port_info->port_num, enable);
-        XP_UNLOCK();
-        port_info->hw_enable = enable;
+    if (port_info) {
+        if (port_info->hw_enable != enable) {
+            XP_LOCK();
+            xp_rc = xpsMacPortEnable(port_info->id, port_info->port_num, enable);
+            XP_UNLOCK();
+            port_info->hw_enable = enable;
+        }
+    } else {
+        xp_rc = XP_ERR_NULL_POINTER;
     }
 
     return (xp_rc == XP_NO_ERR) ? 0 : EPERM;

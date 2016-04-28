@@ -69,41 +69,9 @@ def checkPing(pingOutput):
 
 class xpSimTest( OpsVsiTest ):
 
-    def xp_sim_init_done(self, switches):
-
-        init_time = 0
-        init_done = 0
-        while init_done == 0 and init_time < 180:
-            info("\rIn progress: " + str(init_time))
-            time.sleep(1)
-            init_time += 1
-
-            init_done = 1
-            
-            # For each OPS
-            for s in switches:
-                # Get switch PID
-                ops_switchd_pid = s.ovscmd("/bin/cat /run/openvswitch/ops-switchd.pid")
-                assert ops_switchd_pid != ""
-
-                # Remove \r\n symbols
-                ops_switchd_pid = ops_switchd_pid[:-2]
-                xp_sim_lock_file = "/tmp/xpliant/" + ops_switchd_pid + "/dev/dev0.~lock~"
-                xp_testcmd = "/usr/bin/test -e " + xp_sim_lock_file + "; echo $?"
-
-                if s.ovscmd(xp_testcmd)[0] == "1":
-                    init_done = 0
-                    break
-
-        assert init_done == 1
-
-        sleep(3)
-        info("\n\n")
-
     def setupNet(self):
         host_opts = self.getHostOpts()
         switch_opts = self.getSwitchOpts()
-        os.environ["VSI_IMAGE_NAME"] = "openswitch/xpliant"
         tree_topo = myTopo(hsts=4, sws=3, hopts=host_opts, sopts=switch_opts)
         self.net = Mininet(tree_topo, switch=VsiOpenSwitch,
                            host=Host, link=OpsVsiLink,
@@ -117,13 +85,6 @@ class xpSimTest( OpsVsiTest ):
         info("      [2]S2[3]              [2]S3[3]      \n")
         info("      /     \               /     \       \n")
         info("[h1-eth0]  [h2-eth0]   [h3-eth0]  [h4-eth0]\n")
-
-        info("\n")
-        info("#################################################################\n")
-        info("Waiting upto 180sec for Xpliant OPS initialization completion...\n")
-        info("#################################################################\n")
-        info("\n")
-        self.xp_sim_init_done(self.net.switches)
 
     def net_provision(self):
         s1 = self.net.switches[ 0 ]
@@ -155,8 +116,6 @@ class xpSimTest( OpsVsiTest ):
         s2.ovscmd("/usr/bin/ovs-vsctl set interface 1 user_config:admin=up")
         s2.ovscmd("/usr/bin/ovs-vsctl set interface 2 user_config:admin=up")
         s2.ovscmd("/usr/bin/ovs-vsctl set interface 3 user_config:admin=up")
-        s2.ovscmd("/usr/bin/ovs-vsctl set interface 4 user_config:admin=up")
-        s2.ovscmd("/usr/bin/ovs-vsctl set interface 5 user_config:admin=up")
         info("\n")
 
         info("[s3-1] trunk 200,300\n")
