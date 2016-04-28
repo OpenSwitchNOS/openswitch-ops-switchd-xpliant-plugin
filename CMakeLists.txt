@@ -36,6 +36,7 @@ set (SOURCES ${SRC_DIR}/ops-xp-dev-init.c
              ${SRC_DIR}/ops-xp-port.c
              ${SRC_DIR}/ops-xp-host-netdev.c
              ${SRC_DIR}/ops-xp-host-tap.c
+             ${SRC_DIR}/ops-xp-stg.c
     )
 
 

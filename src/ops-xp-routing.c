@@ -35,6 +35,7 @@
 #include "ops-xp-routing.h"
 #include "ops-xp-vlan.h"
 #include "unixctl.h"
+#include "openXpsReasonCodeTable.h"
 
 VLOG_DEFINE_THIS_MODULE(xp_routing);
 
@@ -61,9 +62,10 @@ typedef struct {
 
 /* Creates and returns a new L3 manager. */
 xp_l3_mgr_t *
-ops_xp_l3_mgr_create(void)
+ops_xp_l3_mgr_create(xpsDevice_t devId)
 {
     xp_l3_mgr_t *mgr = NULL;
+    XP_STATUS status;
 
     mgr = xzalloc(sizeof *mgr);
 
@@ -81,6 +83,14 @@ ops_xp_l3_mgr_create(void)
                         OFPROTO_ECMP_HASH_SRCIP | OFPROTO_ECMP_HASH_DSTIP);
 
     mgr->dbg = xzalloc(sizeof(xp_l3_dbg_t));
+
+    /* Enable L3 Host table lookup */
+    status = xpsL3SetIpv4HostLookupEnable(devId, true);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("%s: Failed to enable IPv4 host lookup."
+                 "Error code: %d\n", __FUNCTION__, status);
+    }
+
     return mgr;
 }
 
@@ -208,7 +218,7 @@ ops_xp_routing_add_host_entry(struct ofproto_xpliant *ofproto,
     e = host_entry_alloc(l3_mgr);
 
     if (local) {
-        e->xp_host.nhEntry.pktCmd = XP_PKTCMD_TRAP;
+        e->xp_host.nhEntry.reasonCode = XP_ROUTE_RC_HOST_TABLE_HIT;
     } else {
         struct ether_addr ether_mac;
 
@@ -258,8 +268,14 @@ ops_xp_routing_add_host_entry(struct ofproto_xpliant *ofproto,
 
     e->is_ipv6_addr = is_ipv6_addr;
 
-    status = xpsL3AddIpHostEntry(ofproto->xpdev->id, &e->xp_host,
-                                 &hash, &rehash);
+    if (local) {
+        status = xpsL3AddIpHostControlEntry(ofproto->xpdev->id, &e->xp_host,
+                                            &hash, &rehash);
+    } else {
+        status = xpsL3AddIpHostEntry(ofproto->xpdev->id, &e->xp_host,
+                                     &hash, &rehash);
+    }
+
     if (status != XP_NO_ERR) {
         VLOG_ERR("%s, Could not add L3 host entry on hardware. Error: %d",
                  __FUNCTION__, status);
@@ -1281,9 +1297,14 @@ ops_xp_routing_disable_l3_interface(struct ofproto_xpliant *ofproto,
                       l3_intf->intf_id, l3_intf->vlan_id);
         }
 
-        rc = ops_xp_vlan_remove(ofproto->vlan_mgr, l3_intf->vlan_id);
-        if (rc) {
-            VLOG_WARN("Failed to remove VLAN %u", l3_intf->vlan_id);
+        if (ops_xp_vlan_is_membership_empty(ofproto->vlan_mgr,
+                                            l3_intf->vlan_id) &&
+            !ops_xp_vlan_is_created_by_user(ofproto->vlan_mgr,
+                                            l3_intf->vlan_id)) {
+            rc = ops_xp_vlan_remove(ofproto->vlan_mgr, l3_intf->vlan_id);
+            if (rc) {
+                VLOG_WARN("Failed to remove VLAN %u", l3_intf->vlan_id);
+            }
         }
     }
 
@@ -1305,18 +1326,11 @@ l3_vlan_iface_create(struct ofproto_xpliant *ofproto,
 
     l3_intf = xzalloc(sizeof *l3_intf);
 
-    status = xpsVlanSetArpBcCmd(ofproto->xpdev->id, vid, XP_PKTCMD_FWD_MIRROR);
-    if (status != XP_NO_ERR) {
-        VLOG_ERR("Failed to set ARP trap action for VLAN %u on Device %d",
-                 vid, ofproto->xpdev->id);
-        return NULL;
-    }
-
     status = xpsL3CreateVlanIntf(vid, &l3_intf->l3_intf_id);
     if (status != XP_NO_ERR) {
         VLOG_ERR("Failed to create L3 VLAN interface on VLAN %u. Error: %d",
                  vid, status);
-        return NULL;
+        goto error;
     }
 
     status = xpsL3SetIntfVrf(ofproto->xpdev->id, l3_intf->l3_intf_id,
@@ -1324,7 +1338,7 @@ l3_vlan_iface_create(struct ofproto_xpliant *ofproto,
     if (status != XP_NO_ERR) {
         VLOG_ERR("Failed to configure VRF index for L3 VLAN interface "
                  "on VLAN %u. Error: %d", vid, status);
-        return NULL;
+        goto error;
     }
 
     status = xpsL3SetIntfIpv4UcRoutingEn(ofproto->xpdev->id,
@@ -1332,7 +1346,7 @@ l3_vlan_iface_create(struct ofproto_xpliant *ofproto,
     if (status != XP_NO_ERR) {
         VLOG_ERR("Failed to enable IPv4 UC routing for L3 VLAN interface "
                  "on VLAN %u. Error: %d", vid, status);
-        return NULL;
+        goto error;
     }
 
     status = xpsL3SetIntfIpv6UcRoutingEn(ofproto->xpdev->id,
@@ -1340,19 +1354,32 @@ l3_vlan_iface_create(struct ofproto_xpliant *ofproto,
     if (status) {
         VLOG_ERR("Failed to enable IPv6 UC routing for L3 VLAN interface "
                  "on VLAN %u. Error: %d", vid, status);
-        return NULL;
+        goto error;
     }
 
     rc = l3_iface_mac_set(ofproto, l3_intf->l3_intf_id, mac);
     if (rc != 0) {
         VLOG_ERR("Failed to set MAC for L3 VLAN interface on VLAN %u", vid);
-        return NULL;
+        goto error;
+    }
+
+    status = xpsVlanSetArpBcCmd(ofproto->xpdev->id, vid, XP_PKTCMD_FWD_MIRROR);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to set ARP trap action for VLAN %u on Device %d",
+                 vid, ofproto->xpdev->id);
+        goto error;
     }
 
     l3_intf->l3_vrf = ofproto->vrf_id;
     l3_intf->vlan_id = vid;
 
     return l3_intf;
+
+error:
+
+    free(l3_intf);
+
+    return NULL;
 }
 
 xp_l3_intf_t *
@@ -1403,6 +1430,69 @@ ops_xp_routing_enable_l3_interface(struct ofproto_xpliant *ofproto,
 
     rc = ops_xp_vlan_member_add(ofproto->vlan_mgr, vid, if_id,
                                 XP_L2_ENCAP_DOT1Q_UNTAGGED, 0);
+    if (rc) {
+        VLOG_ERR("Failed to add Port %u to VLAN %u", if_id, vid);
+        return NULL;
+    }
+
+    l3_intf->vlan_intf = false;
+    l3_intf->intf_id = if_id;
+
+    VLOG_INFO("%s: L3 interface ID 0x%08X", __FUNCTION__, l3_intf->l3_intf_id);
+
+    return l3_intf;
+}
+
+xp_l3_intf_t *
+ops_xp_routing_enable_l3_subinterface(struct ofproto_xpliant *ofproto,
+                                      xpsInterfaceId_t if_id, xpsVlan_t vid,
+                                      macAddr_t mac)
+{
+    XP_STATUS status;
+    xpsInterfaceType_e if_type;
+    xp_l3_intf_t *l3_intf;
+    int rc;
+
+    ovs_assert(ofproto);
+    ovs_assert(ofproto->vlan_mgr);
+
+    VLOG_INFO("%s: Interface ID %u, VLAN %u, MAC "ETH_ADDR_FMT,
+              __FUNCTION__, if_id, vid, ETH_ADDR_BYTES_ARGS(mac));
+
+    status = xpsInterfaceGetType(if_id, &if_type);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to get interface type. Error: %d", status);
+        return NULL;
+    }
+
+    if (if_type != XPS_PORT) {
+        VLOG_ERR("Invalid interface type %u. Error: %d", if_type, status);
+        return NULL;
+    }
+
+    if (!ops_xp_vlan_is_existing(ofproto->vlan_mgr, vid)) {
+        rc = ops_xp_vlan_create(ofproto->vlan_mgr, vid);
+        if (rc) {
+            VLOG_ERR("Failed to create VLAN %u", vid);
+            return NULL;
+        }
+    }
+
+    l3_intf = l3_vlan_iface_create(ofproto, vid, mac);
+    if (l3_intf == NULL) {
+        VLOG_ERR("Failed to create L3 VLAN interface on VLAN %u", vid);
+        return NULL;
+    }
+
+    status = xpsVlanSetUnknownSaCmd(ofproto->xpdev->id, vid, XP_PKTCMD_FWD);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to disable SA learning for VLAN %u on Device %d",
+                 vid, ofproto->xpdev->id);
+        return NULL;
+    }
+
+    rc = ops_xp_vlan_member_add(ofproto->vlan_mgr, vid, if_id,
+                                XP_L2_ENCAP_DOT1Q_TAGGED, 0);
     if (rc) {
         VLOG_ERR("Failed to add Port %u to VLAN %u", if_id, vid);
         return NULL;

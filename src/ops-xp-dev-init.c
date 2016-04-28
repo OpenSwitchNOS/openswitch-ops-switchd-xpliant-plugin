@@ -47,13 +47,14 @@ VLOG_DEFINE_THIS_MODULE(xp_dev_init);
 #define OPS_XPPLATFORM_NAME         "xp-sim"
 #endif
 
+const char **moduleNames = NULL;
+
 static xpsDevConfigStruct_t defaultConfig = {
     XP_ROUTE_CENTRIC_SINGLE_PIPE_PROFILE,     // SELECT PROFILE
-#ifdef OPS_XP_SIM
     SKU_128X10,                               // default speed
+#ifdef OPS_XP_SIM
     XPS_DAL_WHITEMODEL
 #else
-    SKU_32X40,                                // default speed
     XPS_DAL_HARDWARE
 #endif
 };
@@ -61,7 +62,6 @@ static xpsDevConfigStruct_t defaultConfig = {
 int
 ops_xp_sdk_init(xpInitType_t initType)
 {
-    const char **moduleNames = NULL;
     int status = XP_NO_ERR;
 
     moduleNames = xpsSdkLoggerInit();
@@ -88,7 +88,7 @@ ops_xp_sdk_init(xpInitType_t initType)
     xpSetSalType(XP_SAL_HW_TYPE);
 #endif
 
-    xpSalInit();
+    xpSalDefaultInit();
 
 #ifndef OPS_XP_SIM
     status = xpPlatformInit(OPS_XPPLATFORM_NAME, initType, false, NULL);
@@ -165,4 +165,14 @@ ops_xp_dev_config(xpsDevice_t deviceId, void *arg)
     VLOG_INFO("XP device instance allocated!\n");
 
     return status;
+}
+
+XP_STATUS
+ops_xp_sdk_log_level_set(const char *level_name)
+{
+    int id;
+    for (id = 0; moduleNames[id] != NULL; id++) {
+        xpsSdkSetLoggerOptions(id, CONST_CAST(char*, level_name));
+    }
+    return XP_NO_ERR;
 }

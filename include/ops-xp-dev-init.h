@@ -36,4 +36,6 @@ XP_STATUS ops_xp_sdk_dev_remove(xpsDevice_t devId);
 
 XP_STATUS ops_xp_dev_config(xpsDevice_t deviceId, void *arg);
 
+XP_STATUS ops_xp_sdk_log_level_set(const char *level_name);
+
 #endif /* ops-xp-dev-init.h */
