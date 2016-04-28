@@ -25,6 +25,9 @@
 
 #include "ops-xp-netdev.h"
 #include "ops-xp-ofproto-provider.h"
+#include "ops-xp-stg.h"
+#include "plugin-extensions.h"
+#include "asic-plugin.h"
 
 #define init libovs_xpliant_plugin_LTX_init
 #define run libovs_xpliant_plugin_LTX_run
@@ -35,9 +38,32 @@
 
 VLOG_DEFINE_THIS_MODULE(xpliant_plugin);
 
+struct asic_plugin_interface xpliant_interface = {
+    /* The new functions that need to be exported, can be declared here */
+    .create_stg = &ops_xp_create_stg,
+    .delete_stg = &ops_xp_delete_stg,
+    .add_stg_vlan = &ops_xp_add_stg_vlan,
+    .remove_stg_vlan = &ops_xp_remove_stg_vlan,
+    .set_stg_port_state = &ops_xp_set_stg_port_state,
+    .get_stg_port_state = &ops_xp_get_stg_port_state,
+    .get_stg_default = &ops_xp_get_stg_default,
+};
+
+static struct plugin_extension_interface xpliant_extension = {
+    ASIC_PLUGIN_INTERFACE_NAME,
+    ASIC_PLUGIN_INTERFACE_MAJOR,
+    ASIC_PLUGIN_INTERFACE_MINOR,
+    (void *)&xpliant_interface
+};
+
 void
 init(void)
 {
+    register_plugin_extension(&xpliant_extension);
+    VLOG_INFO("The %s asic plugin interface was registered",
+              ASIC_PLUGIN_INTERFACE_NAME);
+
+    ops_xp_register_qos_extension();
 }
 
 void

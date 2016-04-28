@@ -54,6 +54,7 @@ ops_xp_vlan_mgr_create(xpsDevice_t devId, struct ofproto_xpliant *ofproto)
 
     for (i = XP_VLAN_MIN_ID; i <= XP_VLAN_MAX_ID; i++) {
         mgr->table[i].is_existing = false;
+        mgr->table[i].user_created = false;
         hmap_init(&mgr->table[i].members_table);
         hmap_init(&mgr->table[i].vxlan_vnis);
         hmap_init(&mgr->table[i].geneve_vnis);
@@ -504,7 +505,7 @@ ops_xp_vlan_is_flooding(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id)
     ovs_assert(mgr);
 
     if (!ops_xp_vlan_is_existing(mgr, vlan_id)) {
-         VLOG_ERR("%s, Could not set flooding mode on a VLAN."
+         VLOG_ERR("%s, Could not get flooding mode on a VLAN."
                   "VLAN: %d does not exist", __FUNCTION__, vlan_id);
          return false;
     }
@@ -599,4 +600,33 @@ vlan_member_lookup(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id,
     }
 
     return NULL;
+}
+
+bool
+ops_xp_vlan_is_membership_empty(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id)
+{
+    if (ops_xp_vlan_is_existing(mgr, vlan_id)) {
+        return hmap_is_empty(&mgr->table[vlan_id].members_table);
+    }
+
+    return true;
+}
+
+int
+ops_xp_vlan_set_created_by_user(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id,
+                                bool state)
+{
+    if (!ops_xp_vlan_is_existing(mgr, vlan_id)) {
+        return ENOENT;
+    }
+
+    mgr->table[vlan_id].user_created = state;
+    return 0;
+}
+
+bool
+ops_xp_vlan_is_created_by_user(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id)
+{
+    return (ops_xp_vlan_is_existing(mgr, vlan_id) &&
+            mgr->table[vlan_id].user_created);
 }

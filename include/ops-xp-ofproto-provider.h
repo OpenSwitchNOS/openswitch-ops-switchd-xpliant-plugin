@@ -145,4 +145,6 @@ char *ops_xp_get_iface_name(struct ofproto_xpliant* ofproto,
                             xpsInterfaceId_t intfId, uint32_t vni);
 struct ofproto_xpliant *ops_xp_ofproto_lookup(const char *name);
 
+int ops_xp_register_qos_extension(void);
+
 #endif /* ops-xp-ofproto-provider.h */

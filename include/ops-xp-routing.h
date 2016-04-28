@@ -105,7 +105,7 @@ struct ofproto_xpliant;
 
 #define OPS_FAILURE(rc) (((rc) < 0 ) || ((rc) == EINVAL))
 
-xp_l3_mgr_t *ops_xp_l3_mgr_create(void);
+xp_l3_mgr_t *ops_xp_l3_mgr_create(xpsDevice_t devId);
 xp_l3_mgr_t *ops_xp_l3_mgr_ref(xp_l3_mgr_t *mgr);
 void ops_xp_l3_mgr_unref(xp_l3_mgr_t *mgr);
 void ops_xp_l3_mgr_destroy(xp_l3_mgr_t *mgr);
@@ -129,6 +129,11 @@ int ops_xp_routing_ecmp_hash_set(struct ofproto_xpliant *ofproto,
                                  unsigned int hash, bool enable);
 
 xp_l3_intf_t *ops_xp_routing_enable_l3_interface(
+                                    struct ofproto_xpliant *ofproto,
+                                    xpsInterfaceId_t if_id, xpsVlan_t vid,
+                                    macAddr_t mac);
+
+xp_l3_intf_t *ops_xp_routing_enable_l3_subinterface(
                                     struct ofproto_xpliant *ofproto,
                                     xpsInterfaceId_t if_id, xpsVlan_t vid,
                                     macAddr_t mac);
