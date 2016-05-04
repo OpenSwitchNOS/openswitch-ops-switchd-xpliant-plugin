@@ -41,8 +41,6 @@
 #include <vswitch-idl.h>
 #include <openswitch-idl.h>
 #include <ofproto/bond.h>
-#include "plugin-extensions.h"
-#include "qos-asic-provider.h"
 #include "unixctl.h"
 
 #include "ops-xp-vlan-bitmap.h"
@@ -1050,7 +1048,7 @@ bundle_flush_macs(struct bundle_xpliant *bundle)
     ovs_rwlock_unlock(&ml->rwlock);
 }
 
-static struct bundle_xpliant *
+struct bundle_xpliant *
 bundle_lookup(const struct ofproto_xpliant *ofproto, void *aux)
 {
     struct bundle_xpliant *bundle;
@@ -2582,115 +2580,6 @@ ops_xp_ofproto_lookup(const char *name)
     }
     return NULL;
 }
-
-int
-qos_xpliant_set_port_qos_cfg(struct ofproto *ofproto_, void *aux,
-                             const struct qos_port_settings *settings)
-{
-    const struct ofproto_xpliant *ofproto = ops_xp_ofproto_cast(ofproto_);
-    struct bundle_xpliant *bundle;
-
-    VLOG_DBG("%s", __FUNCTION__);
-
-    bundle = bundle_lookup(ofproto, aux);
-    if (bundle) {
-        VLOG_DBG("%s: port %s, settings->qos_trust %d, cfg@ %p",
-                 __FUNCTION__, bundle->name, settings->qos_trust, settings->other_config);
-    } else {
-        VLOG_DBG("%s: NO BUNDLE aux@%p, settings->qos_trust %d, cfg@ %p",
-                 __FUNCTION__, aux, settings->qos_trust, settings->other_config);
-    }
-
-    return 0;
-}
-
-int
-qos_xpliant_set_cos_map(struct ofproto *ofproto_, void *aux,
-                        const struct cos_map_settings *settings)
-{
-    struct cos_map_entry *entry;
-    int i;
-
-    VLOG_DBG("%s", __FUNCTION__);
-
-    for (i = 0; i < settings->n_entries; i++) {
-        entry = &settings->entries[i];
-        VLOG_DBG("%s: ofproto@ %p index=%d color=%d cp=%d lp=%d",
-                 __FUNCTION__, ofproto_, i,
-                 entry->color, entry->codepoint, entry->local_priority);
-    }
-
-    return 0;
-}
-
-int
-qos_xpliant_set_dscp_map(struct ofproto *ofproto_, void *aux,
-                         const struct dscp_map_settings *settings)
-{
-    struct dscp_map_entry *entry;
-    int i;
-
-    VLOG_DBG("%s", __FUNCTION__);
-
-    for (i = 0; i < settings->n_entries; i++) {
-        entry = &settings->entries[i];
-        VLOG_DBG("%s: ofproto@ %p index=%d color=%d cp=%d lp=%d cos=%d",
-                 __FUNCTION__, ofproto_, i, entry->color, entry->codepoint,
-                 entry->local_priority, entry->cos);
-    }
-
-    return 0;
-}
-
-int
-qos_xpliant_apply_qos_profile(struct ofproto *ofproto_, void *aux,
-                              const struct schedule_profile_settings *s_settings,
-                              const struct queue_profile_settings *q_settings)
-{
-    struct queue_profile_entry *qp_entry;
-    struct schedule_profile_entry *sp_entry;
-    int i;
-
-    VLOG_DBG("%s ofproto@ %p aux=%p q_settings=%p s_settings=%p", __FUNCTION__,
-             aux, ofproto_, s_settings, q_settings);
-
-    for (i = 0; i < q_settings->n_entries; i++) {
-        qp_entry = q_settings->entries[i];
-        VLOG_DBG("... %d q=%d #lp=%d", i,
-                 qp_entry->queue, qp_entry->n_local_priorities);
-    }
-
-    for (i = 0; i < s_settings->n_entries; i++) {
-        sp_entry = s_settings->entries[i];
-        VLOG_DBG("... %d q=%d alg=%d wt=%d", i,
-                 sp_entry->queue, sp_entry->algorithm, sp_entry->weight);
-    }
-
-    return 0;
-}
-
-static struct qos_asic_plugin_interface qos_xpliant_interface = {
-    .set_port_qos_cfg = &qos_xpliant_set_port_qos_cfg,
-    .set_cos_map = &qos_xpliant_set_cos_map,
-    .set_dscp_map = &qos_xpliant_set_dscp_map,
-    .apply_qos_profile = &qos_xpliant_apply_qos_profile
-};
-
-static struct plugin_extension_interface qos_xpliant_extension = {
-    QOS_ASIC_PLUGIN_INTERFACE_NAME,
-    QOS_ASIC_PLUGIN_INTERFACE_MAJOR,
-    QOS_ASIC_PLUGIN_INTERFACE_MINOR,
-    (void *)&qos_xpliant_interface
-};
-
-int
-ops_xp_register_qos_extension(void)
-{
-    register_plugin_extension(&qos_xpliant_extension);
-    VLOG_INFO("The %s QoS asic plugin interface was registered",
-              QOS_ASIC_PLUGIN_INTERFACE_NAME);
-}
-
 
 static void
 unixctl_shell_start(struct unixctl_conn *conn, int argc OVS_UNUSED,

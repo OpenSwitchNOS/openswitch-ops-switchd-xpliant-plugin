@@ -72,6 +72,7 @@ netdev_init(xpsDevice_t unit)
         XP_IVIF_RC_BPDU,
         XP_BRIDGE_RC_IVIF_ARPIGMPICMP_CMD,
         XP_ROUTE_RC_HOST_TABLE_HIT,
+        XP_ROUTE_RC_NH_TABLE_HIT,
         XP_ROUTE_RC_ROUTE_NOT_POSSIBLE,
         XP_ROUTE_RC_TTL1_OR_IP_OPTION,
     };
