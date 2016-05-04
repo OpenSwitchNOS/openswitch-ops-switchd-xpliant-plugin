@@ -39,7 +39,6 @@ set (SOURCES ${SRC_DIR}/ops-xp-dev-init.c
              ${SRC_DIR}/ops-xp-stg.c
              ${SRC_DIR}/ops-xp-copp.c
              ${SRC_DIR}/ops-xp-qos.c
-             ${SRC_DIR}/ops-xp-classifier.c
     )
 
 
