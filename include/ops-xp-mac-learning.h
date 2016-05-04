@@ -31,6 +31,7 @@
 #include "ovs-atomic.h"
 #include "ovs-thread.h"
 #include "timeval.h"
+#include "mac-learning-plugin.h"
 
 #include "ops-xp-ofproto-provider.h"
 #include "ops-xp-vlan.h"
@@ -196,5 +197,6 @@ void ops_xp_mac_learning_dump_table(struct xp_mac_learning *ml,
                                     struct ds *d_str);
 bool ops_xp_ml_addr_is_multicast(const macAddr_t mac, bool normal_order);
 
+int ops_xp_mac_learning_hmap_get(struct mlearn_hmap **mhmap);
 
 #endif /* ops-xp-mac-learning.h */

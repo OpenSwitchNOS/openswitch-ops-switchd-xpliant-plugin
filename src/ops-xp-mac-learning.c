@@ -21,7 +21,6 @@
  */
 
 #include <config.h>
-#include "ops-xp-mac-learning.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -873,4 +872,12 @@ ops_xp_mac_learning_dump_table(struct xp_mac_learning *ml, struct ds *d_str)
             free(iface_name);
         }
     }
+}
+
+int
+ops_xp_mac_learning_hmap_get(struct mlearn_hmap **mhmap)
+{
+    VLOG_DBG("%s", __FUNCTION__);
+
+    return 0;
 }
