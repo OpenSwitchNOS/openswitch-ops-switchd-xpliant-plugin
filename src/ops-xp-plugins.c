@@ -29,12 +29,10 @@
 #include "ops-xp-stg.h"
 #include "ops-xp-copp.h"
 #include "ops-xp-qos.h"
-#include "ops-xp-classifier.h"
 #include "plugin-extensions.h"
 #include "asic-plugin.h"
 #include "copp-asic-provider.h"
 #include "qos-asic-provider.h"
-#include "ops-cls-asic-plugin.h"
 
 #define init libovs_xpliant_plugin_LTX_init
 #define run libovs_xpliant_plugin_LTX_run
@@ -98,27 +96,27 @@ static struct plugin_extension_interface qos_xpliant_extension = {
     (void *)&qos_xpliant_interface
 };
 
-static struct ops_cls_plugin_interface cls_xpliant_interface = {
-    /*
-     * The function pointers are set to the interfacing functions
-     * implemented by classifier module in the xpliant-plugin
-     */
-    .ofproto_ops_cls_apply = &ops_xp_cls_apply,
-    .ofproto_ops_cls_remove = &ops_xp_cls_remove,
-    .ofproto_ops_cls_replace = &ops_xp_cls_replace,
-    .ofproto_ops_cls_list_update = &ops_xp_cls_list_update,
-    .ofproto_ops_cls_statistics_get = &ops_xp_cls_stats_get,
-    .ofproto_ops_cls_statistics_clear = &ops_xp_cls_stats_clear,
-    .ofproto_ops_cls_statistics_clear_all = &ops_xp_cls_stats_clear_all,
-    .ofproto_ops_cls_acl_log_pkt_register_cb = &ops_xp_cls_acl_log_pkt_register_cb,
-};
+//static struct ops_cls_plugin_interface cls_xpliant_interface = {
+//    /*
+//     * The function pointers are set to the interfacing functions
+//     * implemented by classifier module in the xpliant-plugin
+//     */
+//    .ofproto_ops_cls_apply = &ops_xp_cls_apply,
+//    .ofproto_ops_cls_remove = &ops_xp_cls_remove,
+//    .ofproto_ops_cls_replace = &ops_xp_cls_replace,
+//    .ofproto_ops_cls_list_update = &ops_xp_cls_list_update,
+//    .ofproto_ops_cls_statistics_get = &ops_xp_cls_stats_get,
+//    .ofproto_ops_cls_statistics_clear = &ops_xp_cls_stats_clear,
+//    .ofproto_ops_cls_statistics_clear_all = &ops_xp_cls_stats_clear_all,
+//    .ofproto_ops_cls_acl_log_pkt_register_cb = &ops_xp_cls_acl_log_pkt_register_cb,
+//};
 
-static struct plugin_extension_interface cls_xpliant_extension = {
-    OPS_CLS_ASIC_PLUGIN_INTERFACE_NAME,
-    OPS_CLS_ASIC_PLUGIN_INTERFACE_MAJOR,
-    OPS_CLS_ASIC_PLUGIN_INTERFACE_MINOR,
-    (void *)&cls_xpliant_interface
-};
+//static struct plugin_extension_interface cls_xpliant_extension = {
+//    OPS_CLS_ASIC_PLUGIN_INTERFACE_NAME,
+//    OPS_CLS_ASIC_PLUGIN_INTERFACE_MAJOR,
+//    OPS_CLS_ASIC_PLUGIN_INTERFACE_MINOR,
+//    (void *)&cls_xpliant_interface
+//};
 
 void
 init(void)
@@ -135,9 +133,9 @@ init(void)
     VLOG_INFO("The %s asic plugin interface was registered",
               QOS_ASIC_PLUGIN_INTERFACE_NAME);
 
-    register_plugin_extension(&cls_xpliant_extension);
-    VLOG_INFO("The %s asic plugin interface was registered",
-              OPS_CLS_ASIC_PLUGIN_INTERFACE_NAME);
+    //register_plugin_extension(&cls_xpliant_extension);
+    //VLOG_INFO("The %s asic plugin interface was registered",
+    //          OPS_CLS_ASIC_PLUGIN_INTERFACE_NAME);
 }
 
 void
