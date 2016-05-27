@@ -572,9 +572,9 @@ netdev_xpliant_set_hw_intf_config(struct netdev *netdev_, const struct smap *arg
         VLOG_WARN("Failed to configure netdev interface %s.", netdev->up.name);
     }
 
-    ovs_mutex_unlock(&netdev->mutex);
-
     netdev_change_seq_changed(netdev_);
+
+    ovs_mutex_unlock(&netdev->mutex);
 
     return 0;
 
@@ -811,12 +811,9 @@ ops_xp_netdev_link_state_callback(struct netdev_xpliant *netdev,
         netdev->link_resets++;
     }
 
+    netdev_change_seq_changed(&(netdev->up));
+
     ovs_mutex_unlock(&netdev->mutex);
-
-    netdev_change_seq_changed((struct netdev *)&(netdev->up));
-
-    /* Wakeup poll_block() function. */
-    seq_change(connectivity_seq_get());
 }
 
 static int
@@ -1398,7 +1395,12 @@ netdev_xpliant_internal_set_hw_intf_config(struct netdev *netdev_,
         return EPERM;
     }
 
+    ovs_mutex_lock(&netdev->mutex);
+
     netdev_change_seq_changed(netdev_);
+
+    ovs_mutex_unlock(&netdev->mutex);
+
     return 0;
 }
 

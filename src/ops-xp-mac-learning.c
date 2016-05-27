@@ -49,11 +49,20 @@
 
 VLOG_DEFINE_THIS_MODULE(xp_mac_learning);
 
+/* MAC learning timer timeout in seconds. */
+#define XP_ML_MLEARN_TIMER_TIMEOUT 30
+
 /*struct xp_mac_learning* g_xp_ml = NULL;*/
 static struct vlog_rate_limit ml_rl = VLOG_RATE_LIMIT_INIT(5, 20);
 
 static void *mac_learning_events_handler(void *arg);
 static void unixctl_init(void);
+static void ops_xp_mac_learning_mlearn_action_add(struct xp_mac_learning *ml,
+                                                  xpsFdbEntry_t *xps_fdb_entry,
+                                                  uint32_t index,
+                                                  uint32_t reHashIndex,
+                                                  const mac_event event);
+static void ops_xp_mac_learning_process_mlearn(struct xp_mac_learning *ml);
 
 bool
 ops_xp_ml_addr_is_multicast(const macAddr_t mac, bool normal_order)
@@ -84,6 +93,8 @@ ops_xp_mac_learning_create(xpsDevice_t dev_id, struct ofproto_xpliant *ofproto,
 {
     struct xp_mac_learning *ml = NULL;
     XP_STATUS status = XP_NO_ERR;
+    int idx = 0;
+    struct plugin_extension_interface *extension = NULL;
 
     ovs_assert(ofproto);
 
@@ -99,6 +110,26 @@ ops_xp_mac_learning_create(xpsDevice_t dev_id, struct ofproto_xpliant *ofproto,
     ovs_rwlock_init(&ml->rwlock);
     latch_init(&ml->exit_latch);   
     latch_init(&ml->event_latch);
+    ml->plugin_interface = NULL;
+    ml->curr_mlearn_table_in_use = 0;
+
+    for (idx = 0; idx < XP_ML_MLEARN_MAX_BUFFERS; idx++) {
+        hmap_init(&(ml->mlearn_event_tables[idx].table));
+        ml->mlearn_event_tables[idx].buffer.actual_size = 0;
+        ml->mlearn_event_tables[idx].buffer.size = BUFFER_SIZE;
+        hmap_reserve(&(ml->mlearn_event_tables[idx].table), BUFFER_SIZE);
+    }
+
+    if (find_plugin_extension(MAC_LEARNING_PLUGIN_INTERFACE_NAME,
+                              MAC_LEARNING_PLUGIN_INTERFACE_MAJOR,
+                              MAC_LEARNING_PLUGIN_INTERFACE_MINOR,
+                              &extension) == 0) {
+        if (extension) {
+            ml->plugin_interface = extension->plugin_interface;
+        }
+    }
+
+    timer_set_duration(&ml->mlearn_timer, XP_ML_MLEARN_TIMER_TIMEOUT * 1000);
 
     /* Start event handling thread */
     ml->ml_thread = ovs_thread_create("ops-xp-ml-handler",
@@ -299,6 +330,9 @@ ops_xp_mac_learning_insert(struct xp_mac_learning *ml, struct xp_mac_entry *e)
                  e->xps_fdb_entry.intfId,
                  e->hmap_node.hash);
 
+    ops_xp_mac_learning_mlearn_action_add(ml, &e->xps_fdb_entry,
+                                          index, reHashIndex, MLEARN_ADD);
+
     return 0;
 }
 
@@ -306,10 +340,16 @@ struct xp_mac_entry *
 ops_xp_mac_learning_lookup(const struct xp_mac_learning *ml,
                            uint32_t hash)
 {
-    struct xp_mac_entry *e = NULL;
+    struct hmap_node *node;
+
     ovs_assert(ml);
-    e = (struct xp_mac_entry*)hmap_first_with_hash(&ml->table, hash);
-    return e;
+
+    node = hmap_first_with_hash(&ml->table, hash);
+    if (node) {
+        return CONTAINER_OF(node, struct xp_mac_entry, hmap_node);
+    }
+
+    return NULL;
 }
 
 struct xp_mac_entry *
@@ -348,6 +388,10 @@ ops_xp_mac_learning_expire(struct xp_mac_learning *ml, struct xp_mac_entry *e)
     }
 
     hmap_remove(&ml->table, &e->hmap_node);
+
+    ops_xp_mac_learning_mlearn_action_add(ml, &e->xps_fdb_entry,
+                                          e->hmap_node.hash,
+                                          e->hmap_node.hash, MLEARN_DEL);
     free(e);
 
     return 0;
@@ -478,6 +522,9 @@ ops_xp_mac_learning_learn(struct xp_mac_learning *ml,
             }
 
             upd_e->xps_fdb_entry.intfId = data->xps_fdb_entry.intfId;
+
+            ops_xp_mac_learning_mlearn_action_add(ml, &upd_e->xps_fdb_entry,
+                                                  index, index, MLEARN_ADD);
 
             status = xpsFdbWriteEntry(ml->devId, index, &upd_e->xps_fdb_entry);
             if (status != XP_NO_ERR) {
@@ -874,10 +921,183 @@ ops_xp_mac_learning_dump_table(struct xp_mac_learning *ml, struct ds *d_str)
     }
 }
 
+/* Checks if the hmap has reached it's capacity or not. */
+static bool
+ops_xp_mac_learning_mlearn_table_is_full(const struct mlearn_hmap *mhmap)
+{
+    return (mhmap->buffer.actual_size == mhmap->buffer.size);
+}
+
+/* Clears the hmap and the buffer for storing the hmap nodes. */
+static void
+ops_xp_mac_learning_clear_mlearn_hmap(struct mlearn_hmap *mhmap)
+{
+    if (mhmap) {
+        memset(&(mhmap->buffer), 0, sizeof(mhmap->buffer));
+        mhmap->buffer.size = BUFFER_SIZE;
+        hmap_clear(&(mhmap->table));
+    }
+}
+
+/* Fills mlearn_hmap_node fields. */
+static void
+ops_xp_mac_learning_mlearn_entry_fill_data(struct ofproto_xpliant *ofproto,
+                                           struct mlearn_hmap_node *entry,
+                                           xpsFdbEntry_t *xps_fdb_entry,
+                                           const mac_event event)
+{
+    char *iface_name;
+
+    ovs_assert(ofproto);
+    ovs_assert(entry);
+    ovs_assert(xps_fdb_entry);
+
+    memset(entry->port_name, 0, PORT_NAME_SIZE);
+
+    ops_xp_mac_copy_and_reverse(entry->mac.ea, xps_fdb_entry->macAddr);
+    entry->port = xps_fdb_entry->intfId;
+    entry->vlan = xps_fdb_entry->vlanId;
+    entry->hw_unit = ofproto->xpdev->id;
+    entry->oper = event;
+
+    iface_name = ops_xp_get_iface_name(ofproto,
+                                       xps_fdb_entry->intfId,
+                                       xps_fdb_entry->serviceInstId);
+    if (iface_name) {
+        strncpy(entry->port_name, iface_name, PORT_NAME_SIZE - 1);
+        free(iface_name);
+    }
+}
+
+/* Adds the action entry in the mlearn_event_tables hmap.
+ *
+ * If the entry is already present, it is modified or else it's created.
+ */
+static void
+ops_xp_mac_learning_mlearn_action_add(struct xp_mac_learning *ml,
+                                      xpsFdbEntry_t *xps_fdb_entry,
+                                      uint32_t index,
+                                      uint32_t reHashIndex,
+                                      const mac_event event)
+    OVS_REQ_WRLOCK(ml->rwlock)
+{
+    struct mlearn_hmap_node *e;
+    struct hmap_node *node;
+    struct mlearn_hmap *mhmap;
+    int actual_size = 0;
+
+    ovs_assert(ml);
+    ovs_assert(xps_fdb_entry);
+
+    mhmap = &ml->mlearn_event_tables[ml->curr_mlearn_table_in_use];
+    actual_size = mhmap->buffer.actual_size;
+
+    node = hmap_first_with_hash(&mhmap->table, index);
+    if (node) {
+        /* Entry already exists - just fill it with new data. */
+        e = CONTAINER_OF(node, struct mlearn_hmap_node, hmap_node);
+
+        if (index != reHashIndex) {
+            /* Rehasing occured - move an old entry to a new place. */
+            if (actual_size < mhmap->buffer.size) {
+                struct mlearn_hmap_node *new_e =
+                                    &(mhmap->buffer.nodes[actual_size]);
+
+                memcpy(new_e, e, sizeof(*new_e));
+                hmap_insert(&mhmap->table, &(new_e->hmap_node), reHashIndex);
+                mhmap->buffer.actual_size++;
+            }  else {
+                VLOG_ERR("Not able to insert elements in hmap, size is: %u\n",
+                         mhmap->buffer.actual_size);
+            }
+        }
+
+        ops_xp_mac_learning_mlearn_entry_fill_data(ml->ofproto, e,
+                                                   xps_fdb_entry, event);
+    } else {
+
+        /* Entry doesn't exist - add a new one. */
+        if (actual_size < mhmap->buffer.size) {
+            e = &(mhmap->buffer.nodes[actual_size]);
+            ops_xp_mac_learning_mlearn_entry_fill_data(ml->ofproto, e,
+                                                       xps_fdb_entry, event);
+            hmap_insert(&mhmap->table, &(e->hmap_node), index);
+            mhmap->buffer.actual_size++;
+        } else {
+            VLOG_ERR("Not able to insert elements in hmap, size is: %u\n",
+                      mhmap->buffer.actual_size);
+        }
+    }
+
+    /* Notify vswitchd */
+    if (ops_xp_mac_learning_mlearn_table_is_full(mhmap)) {
+        ops_xp_mac_learning_process_mlearn(ml);
+    }
+}
+
+/* Main processing function for OPS mlearn tables.
+ *
+ * This function will be invoked when either of the two conditions
+ * are satisfied:
+ * 1. current in use hmap for storing all macs learnt is full
+ * 2. timer thread times out
+ *
+ * This function will check if there is any new MACs learnt, if yes,
+ * then it triggers callback from bridge.
+ * Also it changes the current hmap in use.
+ *
+ * current_hmap_in_use = current_hmap_in_use ^ 1 is used to toggle
+ * the current hmap in use as the buffers are 2.
+ */
+static void
+ops_xp_mac_learning_process_mlearn(struct xp_mac_learning *ml)
+    OVS_REQ_WRLOCK(ml->rwlock)
+{
+    if (ml && ml->plugin_interface) {
+        if (hmap_count(&(ml->mlearn_event_tables[ml->curr_mlearn_table_in_use].table))) {
+            ml->plugin_interface->mac_learning_trigger_callback();
+            ml->curr_mlearn_table_in_use = ml->curr_mlearn_table_in_use ^ 1;
+            ops_xp_mac_learning_clear_mlearn_hmap(&ml->mlearn_event_tables[ml->curr_mlearn_table_in_use]);
+        }
+    } else {
+        VLOG_ERR("%s: Unable to find mac learning plugin interface",
+                 __FUNCTION__);
+    }
+}
+
+/* Mlearn timer expiration handler. */
+void
+ops_xp_mac_learning_on_mlearn_timer_expired(struct xp_mac_learning *ml)
+{
+    if (ml) {
+        ovs_rwlock_wrlock(&ml->rwlock);
+        ops_xp_mac_learning_process_mlearn(ml);
+        timer_set_duration(&ml->mlearn_timer, XP_ML_MLEARN_TIMER_TIMEOUT * 1000);
+        ovs_rwlock_unlock(&ml->rwlock);
+    }
+}
+
 int
 ops_xp_mac_learning_hmap_get(struct mlearn_hmap **mhmap)
 {
-    VLOG_DBG("%s", __FUNCTION__);
+    struct xpliant_dev *xp_dev = ops_xp_dev_by_id(0);
+    struct xp_mac_learning *ml = xp_dev->ml;
+
+    if (!mhmap) {
+        VLOG_ERR("%s: Invalid argument", __FUNCTION__);
+        ops_xp_dev_free(xp_dev);
+        return EINVAL;
+    }
+
+    ovs_rwlock_rdlock(&ml->rwlock);
+    if (hmap_count(&(ml->mlearn_event_tables[ml->curr_mlearn_table_in_use ^ 1].table))) {
+        *mhmap = &ml->mlearn_event_tables[ml->curr_mlearn_table_in_use ^ 1];
+    } else {
+        *mhmap = NULL;
+    }
+    ovs_rwlock_unlock(&ml->rwlock);
+
+    ops_xp_dev_free(xp_dev);
 
     return 0;
 }

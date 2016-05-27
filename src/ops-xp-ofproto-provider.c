@@ -459,6 +459,13 @@ ofproto_xpliant_run(struct ofproto *ofproto_)
     if (ofproto->change_seq != new_seq) {
         ofproto->change_seq = new_seq;
     }
+
+    if (!STR_EQ(ofproto_->type, "vrf")) {
+        if (timer_expired(&ofproto->ml->mlearn_timer)) {
+            ops_xp_mac_learning_on_mlearn_timer_expired(ofproto->ml);
+        }
+    }
+
     return 0;
 }
 

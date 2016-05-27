@@ -392,7 +392,7 @@ ops_xp_port_set_config(struct netdev_xpliant *netdev,
         }
         XP_UNLOCK();
 
-        netdev->link_status = link ? true : false;
+        netdev->link_status = !!link;
     }
 
     /* Update the netdev struct with new config. */

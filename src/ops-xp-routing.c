@@ -2073,7 +2073,7 @@ unixctl_l3_test_show_routes(struct unixctl_conn *conn, int argc OVS_UNUSED,
                           "Removed routes    : %u\n", dbg->updated_routes);
     }
     ds_put_format(&d_str, "Active routes     : %u\n", dbg->active_routes);
-    ds_put_format(&d_str, "Errors            : %u\n", dbg->errors);
+    ds_put_format(&d_str, "Skipped routes    : %u\n", dbg->errors);
     ds_put_format(&d_str, "Execution time    : %u.%06u seconds\n",
                   dbg->exec_sec, dbg->exec_usec);
     ds_put_cstr(&d_str, "====================================================\n");

@@ -83,12 +83,12 @@ ops_xp_sdk_init(xpInitType_t initType)
     }
 
 #ifdef OPS_XP_SIM
-    xpSetSalType(XP_SAL_WM_TYPE);
+    xpsSetSalType(XP_SAL_WM_TYPE);
 #else
-    xpSetSalType(XP_SAL_HW_TYPE);
+    xpsSetSalType(XP_SAL_HW_TYPE);
 #endif
 
-    xpSalDefaultInit();
+    xpsSalDefaultInit();
 
 #ifndef OPS_XP_SIM
     status = xpPlatformInit(OPS_XPPLATFORM_NAME, initType, false, NULL);

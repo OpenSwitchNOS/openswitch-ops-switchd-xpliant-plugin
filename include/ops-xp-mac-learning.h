@@ -31,7 +31,9 @@
 #include "ovs-atomic.h"
 #include "ovs-thread.h"
 #include "timeval.h"
+#include "timer.h"
 #include "mac-learning-plugin.h"
+#include "plugin-extensions.h"
 
 #include "ops-xp-ofproto-provider.h"
 #include "ops-xp-vlan.h"
@@ -48,6 +50,11 @@ struct xp_mac_learning;
 /* Time, in seconds, to lock an entry updated by a gratuitous ARP to avoid
  * relearning based on a reflection from a bond slave. */
 #define XP_ML_GRAT_ARP_LOCK_TIME 5
+
+/* The buffers are defined as 2 in order to allow simultaneous read access to
+ * bridge.c and ops-xp-mac-learning.c code from different threads.
+ */
+#define XP_ML_MLEARN_MAX_BUFFERS   2
 
 /* A MAC learning table entry.
  * Guarded by owning 'xp_mac_learning''s rwlock */
@@ -78,6 +85,13 @@ struct xp_mac_learning {
     struct latch exit_latch;     /* Tells child threads to exit. */
     struct latch event_latch;    /* Events receiving pipe of child thread. */
     xpsDevice_t devId;
+    /* Tables which store mac learning events destined for main
+     * processing in OPS mac-learning-plugin. */
+    struct mlearn_hmap mlearn_event_tables[XP_ML_MLEARN_MAX_BUFFERS];
+    /* Index of a mlearn table which is currently in use. */
+    int curr_mlearn_table_in_use;
+    struct timer mlearn_timer;
+    struct mac_learning_plugin_interface *plugin_interface;
 };
 
 typedef enum {
@@ -196,6 +210,8 @@ void ops_xp_mac_learning_on_vni_removed(struct xp_mac_learning *ml,
 void ops_xp_mac_learning_dump_table(struct xp_mac_learning *ml,
                                     struct ds *d_str);
 bool ops_xp_ml_addr_is_multicast(const macAddr_t mac, bool normal_order);
+
+void ops_xp_mac_learning_on_mlearn_timer_expired(struct xp_mac_learning *ml);
 
 int ops_xp_mac_learning_hmap_get(struct mlearn_hmap **mhmap);
 

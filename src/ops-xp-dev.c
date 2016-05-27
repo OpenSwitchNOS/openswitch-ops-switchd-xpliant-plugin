@@ -471,7 +471,7 @@ static pthread_t
 xp_dev_event_handler_create(struct xpliant_dev *dev)
 {
 #if (XP_DEV_EVENT_MODE == XP_DEV_EVENT_MODE_INTERRUPT)
-    xpEventSignalHandler signalHndlr = xpSalGetEventSignalHandler();
+    xpEventSignalHandler signalHndlr = xpsSalGetEventSignalHandler();
     sigset_t mask;
 
     /* Block XP_RT_SIGNAL singal for main thread */
