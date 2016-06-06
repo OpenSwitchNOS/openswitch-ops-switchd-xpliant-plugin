@@ -616,11 +616,6 @@ tap_packet_driver_cb(xpsDevice_t devId, xpsPort_t portNum,
 
     ovs_mutex_unlock(&info->mutex);
 
-#ifndef OPS_XP_SIM
-    /* Remove timestamp added by HW */
-    buf_size -= 16;
-#endif
-
     /* Send a packet to knet interface. */
     do {
         ret = write(fd, buf, buf_size);
