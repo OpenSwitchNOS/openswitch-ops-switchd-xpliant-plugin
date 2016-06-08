@@ -87,16 +87,16 @@ static XP_STATUS tap_packet_driver_cb(xpsDevice_t devId, xpsPort_t portNum,
                                       void *buf, uint16_t buf_size,
                                       void *userData);
 
-static int tap_init(xpsDevice_t unit);
-static void tap_deinit(xpsDevice_t unit);
-static int tap_if_create(xpsDevice_t unit, char *name,
+static int tap_init(struct xpliant_dev *xp_dev);
+static void tap_deinit(struct xpliant_dev *xp_dev);
+static int tap_if_create(struct xpliant_dev *xp_dev, char *name,
                          xpsInterfaceId_t xps_if_id,
                          struct ether_addr *mac, int *knet_if_id);
-static int tap_if_delete(xpsDevice_t unit, int knet_if_id);
-static int tap_if_filter_create(char *name, xpsDevice_t unit,
+static int tap_if_delete(struct xpliant_dev *xp_dev, int knet_if_id);
+static int tap_if_filter_create(char *name, struct xpliant_dev *xp_dev,
                                 xpsInterfaceId_t xps_if_id,
                                 int host_if_id, int *host_filter_id);
-static int tap_if_filter_delete(xpsDevice_t unit, int host_filter_id);
+static int tap_if_filter_delete(struct xpliant_dev *xp_dev, int host_filter_id);
 
 const struct xp_host_if_api xp_host_tap_api = {
     tap_init,
@@ -108,17 +108,16 @@ const struct xp_host_if_api xp_host_tap_api = {
 };
 
 static int
-tap_init(xpsDevice_t unit)
+tap_init(struct xpliant_dev *xp_dev)
 {
     struct tap_info *info;
     XP_STATUS ret;
-    struct xpliant_dev *xp_dev = ops_xp_dev_by_id(unit);
 
     ovs_assert(xp_dev);
     ovs_assert(xp_dev->host_if_info);
 
     info = xzalloc(sizeof *info);
-    info->dev_id = unit;
+    info->dev_id = xp_dev->id;
 
     ret = xpsPacketDriverFeatureRxHndlr(XP_MAX_CPU_RX_HDLR,
                                         tap_packet_driver_cb,
@@ -127,7 +126,6 @@ tap_init(xpsDevice_t unit)
         VLOG_ERR("%s, Unable to register handler of trapped packets",
                  __FUNCTION__);
         free(info);
-        ops_xp_dev_free(xp_dev);
         return EFAULT;
     }
 
@@ -147,23 +145,18 @@ tap_init(xpsDevice_t unit)
                                               info);
     VLOG_INFO("TAP listener thread started");
 
-    XP_LOCK();
     xp_dev->host_if_info->data = info;
-    XP_UNLOCK();
-
-    ops_xp_dev_free(xp_dev);
 
     return 0;
 }
 
 static void
-tap_deinit(xpsDevice_t unit)
+tap_deinit(struct xpliant_dev *xp_dev)
 {
     struct tap_if_entry *e;
     struct tap_if_entry *next;
     struct tap_info *info;
     XP_STATUS ret;
-    struct xpliant_dev *xp_dev = ops_xp_dev_by_id(unit);
 
     ovs_assert(xp_dev);
     ovs_assert(xp_dev->host_if_info);
@@ -172,7 +165,6 @@ tap_deinit(xpsDevice_t unit)
     info = (struct tap_info *)xp_dev->host_if_info->data;
     xp_dev->host_if_info->data = NULL;
     XP_UNLOCK();
-    ops_xp_dev_free(xp_dev);
 
     if (!info) {
         return;
@@ -195,7 +187,7 @@ tap_deinit(xpsDevice_t unit)
 
     /* Remove knet interfaces. */
     HMAP_FOR_EACH_SAFE (e, next, fd_node, &info->fd_to_tap_if_map) {
-        tap_if_delete(info->dev_id, e->fd);
+        tap_if_delete(xp_dev, e->fd);
     }
 
     hmap_destroy(&info->if_id_to_tap_if_map);
@@ -209,7 +201,7 @@ tap_deinit(xpsDevice_t unit)
 }
 
 static int
-tap_if_create(xpsDevice_t unit, char *name,
+tap_if_create(struct xpliant_dev *xp_dev, char *name,
               xpsInterfaceId_t xps_if_id,
               struct ether_addr *mac, int *host_if_id)
 {
@@ -218,15 +210,13 @@ tap_if_create(xpsDevice_t unit, char *name,
     char tap_if_name[IFNAMSIZ];
     struct tap_info *info;
     struct tap_if_entry *if_entry;
-    struct xpliant_dev *xp_dev = ops_xp_dev_by_id(unit);
 
     ovs_assert(xp_dev);
     ovs_assert(xp_dev->host_if_info);
 
     info = (struct tap_info *)xp_dev->host_if_info->data;
     if (!info) {
-        VLOG_ERR("VPORT not initialized for %d device.", unit);
-        ops_xp_dev_free(xp_dev);
+        VLOG_ERR("VPORT not initialized for %d device.", xp_dev->id);
         return EFAULT;
     }
 
@@ -234,7 +224,6 @@ tap_if_create(xpsDevice_t unit, char *name,
     fd = ops_xp_tun_alloc(tap_if_name, (IFF_TAP | IFF_NO_PI));
     if (fd <= 0) {
         VLOG_ERR("Unable to create %s device.", tap_if_name);
-        ops_xp_dev_free(xp_dev);
         return EFAULT;
     }
 
@@ -242,14 +231,12 @@ tap_if_create(xpsDevice_t unit, char *name,
     if (err) {
         VLOG_ERR("Unable to set %s device into nonblocking mode.", tap_if_name);
         close(fd);
-        ops_xp_dev_free(xp_dev);
         return EFAULT;
     }
 
     if (0 != ops_xp_net_if_setup(tap_if_name, mac)) {
         VLOG_ERR("Unable to setup %s interface.", tap_if_name);
         close(fd);
-        ops_xp_dev_free(xp_dev);
         return EFAULT;
     }
 
@@ -272,31 +259,26 @@ tap_if_create(xpsDevice_t unit, char *name,
     /* Notify listener thread about new TAP interface. */
     ignore(write(info->if_upd_fds[1], "", 1));
 
-    ops_xp_dev_free(xp_dev);
-
     return 0;
 }
 
 static int
-tap_if_delete(xpsDevice_t unit, int host_if_id)
+tap_if_delete(struct xpliant_dev *xp_dev, int host_if_id)
 {
     struct tap_info *info;
     struct tap_if_entry *if_entry;
-    struct xpliant_dev *xp_dev = ops_xp_dev_by_id(unit);
 
     ovs_assert(xp_dev);
     ovs_assert(xp_dev->host_if_info);
 
     info = (struct tap_info *)xp_dev->host_if_info->data;
     if (!info) {
-        VLOG_ERR("Host IF not initialized for %d device.", unit);
-        ops_xp_dev_free(xp_dev);
+        VLOG_ERR("Host IF not initialized for %d device.", xp_dev->id);
         return EFAULT;
     }
 
     if (host_if_id <= 0) {
         VLOG_ERR("Invalid TAP interface ID %d specified.", host_if_id);
-        ops_xp_dev_free(xp_dev);
         return EINVAL;
     }
 
@@ -305,11 +287,10 @@ tap_if_delete(xpsDevice_t unit, int host_if_id)
     if_entry = tap_get_if_entry_by_fd(info, host_if_id);
     if (!if_entry) {
         ovs_mutex_unlock(&info->mutex);
-        ops_xp_dev_free(xp_dev);
         return ENOENT;
     }
 
-    tap_if_filter_delete(unit, if_entry->if_id + 1);
+    tap_if_filter_delete(xp_dev, if_entry->if_id + 1);
 
     hmap_remove(&info->fd_to_tap_if_map, &if_entry->fd_node);
 
@@ -325,33 +306,28 @@ tap_if_delete(xpsDevice_t unit, int host_if_id)
     close(host_if_id);
     free(if_entry);
 
-    ops_xp_dev_free(xp_dev);
-
     return 0;
 }
 
 static int
-tap_if_filter_create(char *name, xpsDevice_t unit,
+tap_if_filter_create(char *name, struct xpliant_dev *xp_dev,
                      xpsInterfaceId_t xps_if_id,
                      int host_if_id, int *host_filter_id)
 {
     struct tap_info *info;
     struct tap_if_entry *if_entry;
-    struct xpliant_dev *xp_dev = ops_xp_dev_by_id(unit);
 
     ovs_assert(xp_dev);
     ovs_assert(xp_dev->host_if_info);
 
     info = (struct tap_info *)xp_dev->host_if_info->data;
     if (!info) {
-        VLOG_ERR("Host IF not initialized for %d device.", unit);
-        ops_xp_dev_free(xp_dev);
+        VLOG_ERR("Host IF not initialized for %d device.", xp_dev->id);
         return EFAULT;
     }
 
     if (host_if_id <= 0) {
         VLOG_ERR("Invalid TAP interface ID %d specified.", host_if_id);
-        ops_xp_dev_free(xp_dev);
         return EINVAL;
     }
 
@@ -360,7 +336,6 @@ tap_if_filter_create(char *name, xpsDevice_t unit,
     if_entry = tap_get_if_entry_by_fd(info, host_if_id);
     if (!if_entry) {
         ovs_mutex_unlock(&info->mutex);
-        ops_xp_dev_free(xp_dev);
         return ENOENT;
     }
 
@@ -368,7 +343,6 @@ tap_if_filter_create(char *name, xpsDevice_t unit,
     {
         /* Filter already present */
         ovs_mutex_unlock(&info->mutex);
-        ops_xp_dev_free(xp_dev);
         return ENOENT;
     }
 
@@ -381,31 +355,26 @@ tap_if_filter_create(char *name, xpsDevice_t unit,
 
     ovs_mutex_unlock(&info->mutex);
 
-    ops_xp_dev_free(xp_dev);
-
     return 0;
 }
 
 static int
-tap_if_filter_delete(xpsDevice_t unit, int host_filter_id)
+tap_if_filter_delete(struct xpliant_dev *xp_dev, int host_filter_id)
 {
     struct tap_info *info;
     struct tap_if_entry *if_entry;
-    struct xpliant_dev *xp_dev = ops_xp_dev_by_id(unit);
 
     ovs_assert(xp_dev);
     ovs_assert(xp_dev->host_if_info);
 
     info = (struct tap_info *)xp_dev->host_if_info->data;
     if (!info) {
-        VLOG_ERR("Host IF not initialized for %d device.", unit);
-        ops_xp_dev_free(xp_dev);
+        VLOG_ERR("Host IF not initialized for %d device.", xp_dev->id);
         return EFAULT;
     }
 
     if (host_filter_id <= 0) {
         VLOG_ERR("Invalid TAP interface ID %d specified.", host_filter_id);
-        ops_xp_dev_free(xp_dev);
         return EINVAL;
     }
 
@@ -414,7 +383,6 @@ tap_if_filter_delete(xpsDevice_t unit, int host_filter_id)
     if_entry = tap_get_if_entry_by_if_id(info, host_filter_id - 1);
     if (!if_entry) {
         ovs_mutex_unlock(&info->mutex);
-        ops_xp_dev_free(xp_dev);
         return ENOENT;
     }
 
@@ -423,8 +391,6 @@ tap_if_filter_delete(xpsDevice_t unit, int host_filter_id)
     if_entry->if_id = XPS_INTF_INVALID_ID;
 
     ovs_mutex_unlock(&info->mutex);
-
-    ops_xp_dev_free(xp_dev);
 
     return 0;
 }
@@ -615,6 +581,7 @@ tap_packet_driver_cb(xpsDevice_t devId, xpsPort_t portNum,
              __FUNCTION__, buf_size, if_id);
 
     ovs_mutex_unlock(&info->mutex);
+
 
     /* Send a packet to knet interface. */
     do {

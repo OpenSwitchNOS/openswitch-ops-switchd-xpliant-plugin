@@ -47,6 +47,8 @@
 
 struct netdev_xpliant;
 struct xp_l3_mgr;
+struct xp_vlan_mgr;
+struct xp_mac_learning;
 struct xp_host_if_info;
 
 struct xpliant_dev {
@@ -59,7 +61,6 @@ struct xpliant_dev {
     struct latch rxq_latch;         /* Tells child threads to handle pkt Rx. */
     int ref_cnt;                    /* Times this devices was opened. */
     bool init_done;
-    void *aux;                      /* Pointer to user data structure */
 
     struct xp_vlan_mgr *vlan_mgr;
     struct xp_mac_learning *ml;
@@ -71,13 +72,15 @@ struct xpliant_dev {
     struct xp_host_if_info *host_if_info;
 
     struct xp_port_info port_info[XP_MAX_TOTAL_PORTS];
+    struct ovs_rwlock if_id_to_name_lock;
+    struct hmap if_id_to_name_map; /* Holds interface ID to name mapping. */
 };
 
 int ops_xp_dev_srv_init(void);
 struct xpliant_dev *ops_xp_dev_by_id(xpsDevice_t id);
 struct xpliant_dev *ops_xp_dev_alloc(xpsDevice_t id);
 void ops_xp_dev_free(struct xpliant_dev * const dev);
-int ops_xp_dev_init(struct xpliant_dev * const dev, void *aux);
+int ops_xp_dev_init(struct xpliant_dev * dev);
 bool ops_xp_dev_is_initialized(const struct xpliant_dev *dev);
 void ops_xp_mutex_lock(void);
 void ops_xp_mutex_unlock(void);
@@ -87,5 +90,13 @@ int ops_xp_dev_send(xpsDevice_t xp_dev_id, xpsInterfaceId_t dst_if_id,
                     void *buff, uint16_t buff_size);
 xp_host_if_type_t ops_xp_host_if_type_get(void);
 xpPacketInterface ops_xp_packet_if_type_get(void);
-
+int ops_xp_dev_add_intf_entry(struct xpliant_dev *xpdev,
+                              xpsInterfaceId_t intf_id,
+                              char *intf_name, uint32_t vni);
+void ops_xp_dev_remove_intf_entry(struct xpliant_dev *xpdev,
+                                  xpsInterfaceId_t intf_id,
+                                  uint32_t vni);
+char* ops_xp_dev_get_intf_name(struct xpliant_dev *xpdev,
+                               xpsInterfaceId_t intfId,
+                               uint32_t vni);
 #endif /* ops-xp-dev.h */

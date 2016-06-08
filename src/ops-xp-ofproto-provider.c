@@ -81,16 +81,10 @@ static struct hmap all_ofproto_xpliant = HMAP_INITIALIZER(&all_ofproto_xpliant);
 
 #define XP_VRF_DEFAULT_ID 0
 
-static const struct eth_addr eth_addr_lldp OVS_UNUSED
-    = { { { 0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E } } };
-
 typedef uint32_t OVS_BITWISE odp_port_t;
 #define ODP_PORT_C(X) ((OVS_FORCE odp_port_t) (X))
 #define ODPP_NONE  ODP_PORT_C(UINT32_MAX)
 #define ODPP_LOCAL ODP_PORT_C(OVSP_LOCAL)
-
-#define XP_CPU_PORT_NUM         135
-
 
 /* Xpliant OpenFlow Datapath Port */
 struct xp_odp_port {
@@ -133,8 +127,6 @@ static struct xp_odp_port *dp_lookup_port(const struct ofproto_xpliant *ofproto,
 
 static void ofproto_xpliant_bundle_remove(struct ofport *port_);
 static void bundle_destroy(struct bundle_xpliant *bundle);
-static int port_default_vlan_set(struct ofproto_xpliant *ofproto,
-                                 xpsPort_t port_num, xpsVlan_t vlan_id);
 static void bundle_run(struct bundle_xpliant *bundle);
 static void bundle_wait(struct bundle_xpliant *bundle);
 static void bundle_update(struct bundle_xpliant *bundle);
@@ -143,6 +135,7 @@ static struct ofport_xpliant *dp_port_to_ofport(
         const struct ofproto_xpliant *ofproto, odp_port_t odp_port);
 static ofp_port_t odp_port_to_ofp_port(const struct ofproto_xpliant *ofproto,
                                        odp_port_t odp_port);
+static void ofproto_system_defaults_set(struct ofproto_xpliant *ofproto);
 
 static inline struct ofport_xpliant *
 ofport_xpliant_cast(const struct ofport *ofport)
@@ -165,7 +158,7 @@ ofproto_xpliant_init(const struct shash *iface_hints OVS_UNUSED)
      * OpenFlow Datapath configuration between 'ofproto' restarts.
      * So, we ignore startup configuration provided through 'iface_hints' */
 
-	/* Perform XDK initialization and start IPC server */
+    /* Perform XDK initialization and start IPC server */
     ops_xp_dev_srv_init();
 }
 
@@ -274,22 +267,27 @@ ofproto_xpliant_construct(struct ofproto *ofproto_)
 {
     struct ofproto_xpliant *ofproto = ops_xp_ofproto_cast(ofproto_);
     uint32_t dev_id = 0;
-    int error = 0;
-    macAddr_t keyMAC;
-    XP_STATUS status = XP_NO_ERR;
     int i;
 
-    VLOG_INFO("%s: up.name %s\n", __FUNCTION__, ofproto->up.name);
+    VLOG_INFO("%s: up.name %s, up.type %s\n", __FUNCTION__, ofproto->up.name,
+              ofproto->up.type);
+
+    /* Initialize XP device. */
+    for (;;) {
+        ofproto->xpdev = ops_xp_dev_by_id(dev_id);
+        if (ofproto->xpdev) {
+            if(!ops_xp_dev_is_initialized(ofproto->xpdev)) {
+                ops_xp_dev_init(ofproto->xpdev);
+            }
+            break;
+        }
+        ops_xp_msleep(100);
+    }
 
     memset(ofproto->sys_mac.ea, 0, ETH_ADDR_LEN);
 
     /* Initialize VRF instance */
     if (STR_EQ(ofproto_->type, "vrf")) {
-        ofproto->xpdev = ops_xp_dev_by_id(dev_id);
-        if(!ops_xp_dev_is_initialized(ofproto->xpdev)) {
-            VLOG_ERR("Device #%d has not been initialized yet!\n", dev_id);
-            return EPERM;
-        }
         ofproto->bond_mgr = NULL;
         ofproto->vlan_mgr = ofproto->xpdev->vlan_mgr;
         ofproto->ml = ofproto->xpdev->ml;
@@ -322,57 +320,14 @@ ofproto_xpliant_construct(struct ofproto *ofproto_)
         return 0;
     }
 
-    /* Initialize XP device */
+    /* Initialize 'system' ofproto */
     ofproto->vrf = false;
     ofproto->vrf_id = XP_VRF_DEFAULT_ID;
     ofproto->l3_mgr = NULL;
-
-    for (;;) {
-        ofproto->xpdev = ops_xp_dev_by_id(dev_id);
-        if (ofproto->xpdev) {
-            if(!ops_xp_dev_is_initialized(ofproto->xpdev)) {
-                ops_xp_dev_init(ofproto->xpdev, ofproto);
-            }
-            break;
-        }
-        ops_xp_msleep(100);
-    }
-
-    ops_xp_host_init(ofproto->xpdev->id, ops_xp_host_if_type_get());
-
-    /* Create L2 Bridge */
-
-    status = ops_xp_lag_set_balance_mode(ofproto->xpdev->id,
-                                         BM_L3_SRC_DST_HASH);
-    if (status != XP_NO_ERR) {
-        VLOG_ERR("%s: Error in setting default LAG hash mode. "
-                 "Error code: %d\n", __FUNCTION__, status);
-    }
+    ofproto->vlan_mgr = ofproto->xpdev->vlan_mgr;
+    ofproto->ml = ofproto->xpdev->ml;
 
     hmap_init(&ofproto->bundles);
-    ofproto->vlan_mgr = ops_xp_vlan_mgr_create(ofproto->xpdev->id, ofproto);
-    if (!ofproto->vlan_mgr) {
-         VLOG_ERR("Unable to create VLAN manager");
-         return EPERM;
-    }
-    ofproto->xpdev->vlan_mgr = ofproto->vlan_mgr;
-
-    /* Update pVid on CPU port so we can send VLAN untagged packets
-     * from CPU (OFPP_LOCAL of OFPP_CONTROLLER) to start of pipeline */
-    error = port_default_vlan_set(ofproto, XP_CPU_PORT_NUM, XP_DEFAULT_VLAN_ID);
-    if (error) {
-        VLOG_ERR("Unable to set default VLAN for CPU port");
-    }
-
-    ofproto->ml = ops_xp_mac_learning_create(ofproto->xpdev->id, ofproto,
-                                             XP_ML_ENTRY_DEFAULT_IDLE_TIME);
-    if (!ofproto->ml) {
-         VLOG_ERR("Unable to create mac learning feature");
-         return EPERM;
-    }
-    ofproto->xpdev->ml = ofproto->ml;
-
-    ofproto_xpliant_unixctl_init();
 
     sset_init(&ofproto->ports);
     sset_init(&ofproto->ghost_ports);
@@ -389,29 +344,9 @@ ofproto_xpliant_construct(struct ofproto *ofproto_)
     ofproto_init_tables(ofproto_, N_TABLES);
     ofproto->up.tables[TBL_INTERNAL].flags = OFTABLE_HIDDEN | OFTABLE_READONLY;
 
-    /* Configure control MAC for LACP packets in hardware.*/
+    ofproto_xpliant_unixctl_init();
 
-    /* XDK APIs use MAC in reverse order. */
-    ops_xp_mac_copy_and_reverse(keyMAC, eth_addr_lacp.ea);
-
-    status = xpsVlanSetGlobalControlMac(ofproto->xpdev->id, keyMAC);
-    if (status != XP_NO_ERR) {
-        VLOG_ERR("%s: Error in inserting control MAC entry for LACP. "
-                 "Error code: %d\n", __FUNCTION__, status);
-        return EPERM;
-    }
-
-    /* Configure control MAC for LLDP packets in hardware.*/
-    ops_xp_mac_copy_and_reverse(keyMAC, eth_addr_lldp.ea);
-
-    status = xpsVlanSetGlobalControlMac(ofproto->xpdev->id, keyMAC);
-    if (status != XP_NO_ERR) {
-        VLOG_ERR("%s: Error in inserting control MAC entry for LLDP. "
-                 "Error code: %d\n", __FUNCTION__, status);
-        return EPERM;
-    }
-
-    return error;
+    return 0;
 }
 
 
@@ -424,8 +359,7 @@ ofproto_xpliant_destruct(struct ofproto *ofproto_)
     VLOG_INFO("%s: up.name %s", __FUNCTION__, ofproto->up.name);
 
     ops_xp_l3_mgr_unref(ofproto->l3_mgr);
-    ops_xp_mac_learning_unref(ofproto->ml);
-    ops_xp_vlan_mgr_unref(ofproto->vlan_mgr);
+
     hmap_remove(&all_ofproto_xpliant, &ofproto->all_ofproto_xpliant_node);
 
     hmap_destroy(&ofproto->bundles);
@@ -441,8 +375,6 @@ ofproto_xpliant_destruct(struct ofproto *ofproto_)
     }
     ovs_rwlock_unlock(&ofproto->dp_port_rwlock);
 
-    ovs_rwlock_destroy(&ofproto->xpdev->odp_to_ofport_lock);
-    hmap_destroy(&ofproto->xpdev->odp_to_ofport_map);
     ops_xp_dev_free(ofproto->xpdev);
 
     hmap_destroy(&ofproto->dp_ports);
@@ -482,7 +414,6 @@ ofproto_xpliant_type_get_memory_usage(const char *type, struct simap *usage)
     VLOG_INFO("%s: type %s", __FUNCTION__, type);
     /* TODO */
 }
-
 
 /* ## ---------------- ## */
 /* ## ofport Functions ## */
@@ -1118,81 +1049,6 @@ ops_xp_get_ofport_intf_id(const struct ofport_xpliant *port)
     return netdev_xpliant_cast(port->up.netdev)->ifId;
 }
 
-/* Returns name of interface if it exists. Otherwise NULL.
- * Dynamically allocates memory for interface name. */
-char *
-ops_xp_get_iface_name(struct ofproto_xpliant* ofproto,
-                      xpsInterfaceId_t intfId, uint32_t vni)
-{
-    xpsInterfaceType_e  type;
-    XP_STATUS status = XP_NO_ERR;
-    char *name = NULL;
- 
-    ovs_assert(ofproto);
-
-    status = xpsInterfaceGetType(intfId, &type);
-    if (status != XP_NO_ERR) {
-        VLOG_ERR("%s: Could not get type of interface %d. Error: (%d)",
-                 __FUNCTION__, intfId, status);
-        return NULL;
-    }
-
-    switch (type) {
-    case XPS_PORT:
-    case XPS_LAG:
-        {
-            struct bundle_xpliant *bundle;
-
-            bundle = bundle_lookup_by_intf_id(ofproto, intfId);
-            if (bundle) {
-                name = xstrdup(bundle->name);
-            }
-
-            return name;
-        }
-    default:
-        return NULL;
-    }
-
-    return NULL;
-}
-
-static int
-port_default_vlan_set(struct ofproto_xpliant *ofproto,
-                      xpsPort_t port_num, xpsVlan_t vlan_id)
-{
-    XP_STATUS status = XP_NO_ERR;
-    xpsPortConfig_t port_cfg;
-
-    VLOG_INFO("set_port_vlan_id: port#%u, vid#%u",
-              port_num, vlan_id);
-
-    status = xpsPortGetConfig(ofproto->xpdev->id, port_num, &port_cfg);
-    if (status) {
-        VLOG_ERR("Could not get current config "
-                 "for the port: %u. Error code: %d",
-                 port_num, status);
-        return EPERM;
-    }
-
-    if ((port_cfg.pvid != vlan_id) ||
-        (port_cfg.pvidModeAllPkt != 1)) {
-
-        port_cfg.pvidModeAllPkt = 1;
-        port_cfg.pvid = vlan_id;
-
-        status = xpsPortSetConfig(ofproto->xpdev->id, port_num, &port_cfg);
-        if (status) {
-            VLOG_ERR("Could not set default VLAN "
-                     "for the port: %u. Error code: %d",
-                     port_num, status);
-            return EPERM;
-        }
-    }
-
-    return 0;
-}
-
 static void
 bundle_run(struct bundle_xpliant *bundle)
 {
@@ -1400,9 +1256,9 @@ bundle_update_vlan_config(struct ofproto_xpliant *ofproto,
             VLOG_INFO("%s: Set default VLAN %u on Port %u",
                       __FUNCTION__, bundle->vlan,
                       ops_xp_get_ofport_number(port));
-            retVal = port_default_vlan_set(ofproto,
-                                           ops_xp_get_ofport_number(port),
-                                           bundle->vlan);
+            retVal = ops_xp_port_default_vlan_set(ofproto->xpdev->id,
+                                                  ops_xp_get_ofport_number(port),
+                                                  bundle->vlan);
             if (retVal) {
                 return retVal;
             }
@@ -1912,6 +1768,8 @@ bundle_destroy(struct bundle_xpliant *bundle)
     port_unconfigure_ips(bundle);
 
     if (bundle->l3_intf) {
+        ops_xp_dev_remove_intf_entry(ofproto->xpdev,
+                                     bundle->l3_intf->l3_intf_id, 0);
         ops_xp_routing_disable_l3_interface(ofproto, bundle->l3_intf);
         bundle->l3_intf = NULL;
     }
@@ -1923,8 +1781,12 @@ bundle_destroy(struct bundle_xpliant *bundle)
     ops_xp_vlan_port_clear_all_membership(ofproto->vlan_mgr, bundle->intfId);
     ovs_rwlock_unlock(&ofproto->vlan_mgr->rwlock);
 
-    if ((bundle->intfId != XPS_INTF_INVALID_ID) && bundle->is_lag) {
-        ops_xp_lag_destroy(ofproto->xpdev->id, bundle->name, bundle->intfId);
+    if (bundle->intfId != XPS_INTF_INVALID_ID) {
+        ops_xp_dev_remove_intf_entry(ofproto->xpdev, bundle->intfId, 0);
+
+        if (bundle->is_lag) {
+            ops_xp_lag_destroy(ofproto->xpdev->id, bundle->name, bundle->intfId);
+        }
     }
 
     LIST_FOR_EACH_SAFE (port, next_port, bundle_node, &bundle->ports) {
@@ -2081,9 +1943,9 @@ ofproto_xpliant_bundle_set(struct ofproto *ofproto_, void *aux,
                 /* TODO: Check whether the default VLAN is not set by
                  * xpsVlanAddInterface() inside xp_routing_enable_l3_interface()
                  */
-                port_default_vlan_set(ofproto,
-                                      ops_xp_get_ofport_number(port),
-                                      vlan_id);
+                ops_xp_port_default_vlan_set(ofproto->xpdev->id,
+                                             ops_xp_get_ofport_number(port),
+                                             vlan_id);
             } else if (STR_EQ(type, OVSREC_INTERFACE_TYPE_VLANSUBINT)) {
                 bundle->intfId = ops_xp_get_ofport_intf_id(port);
                 bundle->l3_intf = \
@@ -2155,6 +2017,15 @@ ofproto_xpliant_bundle_set(struct ofproto *ofproto_, void *aux,
             if (need_flush) {
                 bundle_flush_macs(bundle);
             }
+
+            ops_xp_dev_add_intf_entry(ofproto->xpdev, bundle->intfId,
+                                      bundle->name, 0);
+        }
+    } else {
+        if (bundle->l3_intf) {
+            ops_xp_dev_add_intf_entry(ofproto->xpdev,
+                                      bundle->l3_intf->l3_intf_id,
+                                      bundle->name, 0);
         }
     }
 
@@ -2292,18 +2163,6 @@ ofproto_xpliant_forward_bpdu_changed(struct ofproto *ofproto_)
     struct ofproto_xpliant *ofproto = ops_xp_ofproto_cast(ofproto_);
 	
 	/* TODO */    
-}
-
-static void
-ofproto_xpliant_set_mac_table_config(struct ofproto *ofproto_,
-                                     unsigned int idle_time,
-                                     size_t max_entries)
-{
-    struct ofproto_xpliant *ofproto = ops_xp_ofproto_cast(ofproto_);
-    ovs_rwlock_wrlock(&ofproto->ml->rwlock);
-    ops_xp_mac_learning_set_idle_time(ofproto->ml, idle_time);
-    ops_xp_mac_learning_set_max_entries(ofproto->ml, max_entries);
-    ovs_rwlock_unlock(&ofproto->ml->rwlock);
 }
 
 static int
@@ -2538,7 +2397,7 @@ const struct ofproto_class ofproto_xpliant_class = {
     ofproto_xpliant_set_flood_vlans,
     ofproto_xpliant_is_mirror_output_bundle,
     ofproto_xpliant_forward_bpdu_changed,
-    ofproto_xpliant_set_mac_table_config,
+    NULL,                       /* set_mac_table_config */
     NULL,                       /* set_mcast_snooping */
     NULL,                       /* set_mcast_snooping_port */
     NULL,                       /* set_realdev */

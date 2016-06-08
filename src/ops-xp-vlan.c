@@ -40,17 +40,14 @@ vlan_member_lookup(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id,
  * and hash table are created here for each VLAN and are destroyed 
  * only during VLAN manager removal. */ 
 struct xp_vlan_mgr *
-ops_xp_vlan_mgr_create(xpsDevice_t devId, struct ofproto_xpliant *ofproto)
+ops_xp_vlan_mgr_create(xpsDevice_t devId)
 {
     struct xp_vlan_mgr *mgr = NULL;
     int i = 0;
 
-    ovs_assert(ofproto);
-
     mgr = xmalloc(sizeof *mgr);
 
     mgr->dev_id = devId;
-    mgr->ofproto = ofproto;
 
     for (i = XP_VLAN_MIN_ID; i <= XP_VLAN_MAX_ID; i++) {
         mgr->table[i].is_existing = false;

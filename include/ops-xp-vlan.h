@@ -71,8 +71,7 @@ struct xp_vlan_mgr {
 };
 
 /* Basics. */
-struct xp_vlan_mgr *ops_xp_vlan_mgr_create(xpsDevice_t devId,
-                                           struct ofproto_xpliant* ofproto);
+struct xp_vlan_mgr *ops_xp_vlan_mgr_create(xpsDevice_t devId);
 struct xp_vlan_mgr *ops_xp_vlan_mgr_ref(struct xp_vlan_mgr *mgr);
 void ops_xp_vlan_mgr_unref(struct xp_vlan_mgr* mgr);
 

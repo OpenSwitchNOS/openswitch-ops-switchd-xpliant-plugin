@@ -213,7 +213,7 @@ netdev_xpliant_destruct(struct netdev *netdev_)
     ovs_mutex_lock(&xp_netdev_list_mutex);
 
     if (netdev->knet_if_id) {
-        retval = ops_xp_host_if_delete(netdev->xpdev->id, netdev->knet_if_id);
+        retval = ops_xp_host_if_delete(netdev->xpdev, netdev->knet_if_id);
 
         if (retval) {
             VLOG_ERR("Failed to delete kernel KNET interface %s",
@@ -371,9 +371,10 @@ netdev_xpliant_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
             }
         }
 
-        rc = ops_xp_host_if_create(netdev->xpdev->id, netdev->up.name,
+        rc = ops_xp_host_if_create(netdev->xpdev, netdev->up.name,
                                    netdev->ifId, ether_mac,
                                    &netdev->knet_if_id);
+
         if (rc) {
             VLOG_ERR("Failed to initialize interface %s", netdev->up.name);
         } else {
@@ -463,11 +464,11 @@ static void
 handle_xp_host_port_filters(struct netdev_xpliant *netdev, int enable)
 {
     if ((enable == true) && (netdev->knet_port_filter_id == 0)) {
-        ops_xp_host_port_filter_create(netdev->up.name, netdev->xpdev->id,
+        ops_xp_host_port_filter_create(netdev->up.name, netdev->xpdev,
                                        netdev->ifId, netdev->knet_if_id,
                                        &netdev->knet_port_filter_id);
     } else if ((enable == false) && (netdev->knet_port_filter_id != 0)) {
-        ops_xp_host_filter_delete(netdev->up.name, netdev->xpdev->id,
+        ops_xp_host_filter_delete(netdev->up.name, netdev->xpdev,
                                   netdev->knet_port_filter_id);
         netdev->knet_port_filter_id = 0;
     }

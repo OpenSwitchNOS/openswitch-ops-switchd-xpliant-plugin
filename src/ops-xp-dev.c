@@ -27,10 +27,14 @@
 #include <errno.h>
 
 #include "ops-xp-dev.h"
+#include "ops-xp-mac-learning.h"
+#include "ops-xp-vlan.h"
+#include "ops-xp-lag.h"
 #include "ops-xp-dev-init.h"
 #include "ops-xp-routing.h"
 #include "ops-xp-netdev.h"
 #include <openvswitch/vlog.h>
+#include <ofproto/bond.h>
 #include "util.h"
 #include "poll-loop.h"
 #include "fatal-signal.h"
@@ -44,6 +48,13 @@
 #include "dummy.h"
 
 VLOG_DEFINE_THIS_MODULE(xp_dev);
+
+#define XP_CPU_PORT_NUM         135
+
+struct xp_if_id_to_name_entry {
+    struct hmap_node hmap_node;       /* Node in if_id_to_name_map hmap. */
+    char *intf_name;
+};
 
 #ifdef OPS_XP_SIM
 typedef XP_STATUS (*xpSimulatorInitFuncPtr_t)(xpsDevice_t devId, void *arg);
@@ -76,6 +87,9 @@ static struct xpliant_dev *gXpDev[XP_MAX_DEVICES];
 
 static xp_host_if_type_t host_if_type = XP_HOST_IF_TAP;
 static xpPacketInterface packet_if_type = XP_DMA;
+
+static const struct eth_addr eth_addr_lldp OVS_UNUSED
+    = { { { 0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E } } };
 
 static void *xp_dev_recv_handler(void *arg);
 static pthread_t xp_dev_event_handler_create(struct xpliant_dev *dev);
@@ -164,8 +178,50 @@ ops_xp_dev_is_initialized(const struct xpliant_dev *dev)
     return dev ? dev->init_done : false;
 }
 
+static void
+ops_xp_dev_system_defaults_set(const struct xpliant_dev *dev)
+{
+    macAddr_t key_mac;
+    int error;
+    XP_STATUS status;
+
+    /* Update pVid on CPU port so we can send VLAN untagged packets
+     * from CPU (OFPP_LOCAL of OFPP_CONTROLLER) to start of pipeline */
+    error = ops_xp_port_default_vlan_set(dev->id, XP_CPU_PORT_NUM,
+                                         XP_DEFAULT_VLAN_ID);
+    if (error) {
+        VLOG_ERR("Unable to set default VLAN for CPU port");
+    }
+
+    error = ops_xp_lag_set_balance_mode(dev->id, BM_L3_SRC_DST_HASH);
+    if (error != XP_NO_ERR) {
+        VLOG_ERR("%s: Error in setting default LAG hash mode. "
+                 "Error code: %d\n", __FUNCTION__, status);
+    }
+
+    /* Configure control MAC for LACP packets in hardware.*/
+
+    /* XDK APIs use MAC in reverse order. */
+    ops_xp_mac_copy_and_reverse(key_mac, eth_addr_lacp.ea);
+
+    status = xpsVlanSetGlobalControlMac(dev->id, key_mac);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("%s: Error in inserting control MAC entry for LACP. "
+                 "Error code: %d\n", __FUNCTION__, status);
+    }
+
+    /* Configure control MAC for LLDP packets in hardware.*/
+    ops_xp_mac_copy_and_reverse(key_mac, eth_addr_lldp.ea);
+
+    status = xpsVlanSetGlobalControlMac(dev->id, key_mac);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("%s: Error in inserting control MAC entry for LLDP. "
+                 "Error code: %d\n", __FUNCTION__, status);
+    }
+}
+
 int
-ops_xp_dev_init(struct xpliant_dev * const dev, void *aux)
+ops_xp_dev_init(struct xpliant_dev *dev)
     OVS_EXCLUDED(xpdev_mutex)
 {
     XP_STATUS ret = XP_NO_ERR;
@@ -180,16 +236,17 @@ ops_xp_dev_init(struct xpliant_dev * const dev, void *aux)
 
     XP_LOCK();
 
-    hmap_init(&dev->odp_to_ofport_map);
-    ovs_rwlock_init(&dev->odp_to_ofport_lock);
-
-    dev->aux = aux;
-
     if (dev->init_done) {
         VLOG_WARN("Xpliant device #%d has already been initialized", dev->id);
         XP_UNLOCK();
         return 0;
     }
+
+    hmap_init(&dev->odp_to_ofport_map);
+    ovs_rwlock_init(&dev->odp_to_ofport_lock);
+
+    hmap_init(&dev->if_id_to_name_map);
+    ovs_rwlock_init(&dev->if_id_to_name_lock);
 
     ret = xpsPacketDriverRxConfigModeSet(dev->id, POLL);
     if (ret != XP_NO_ERR) {
@@ -208,7 +265,7 @@ ops_xp_dev_init(struct xpliant_dev * const dev, void *aux)
     ret = xpsPacketDriverRxConfigModeGet(dev->id, &dev->rx_mode);
     if (ret != XP_NO_ERR) {
         VLOG_ERR("Unable to get Rx mode of device #%d. RC = %u",
-                dev->id, ret);
+                 dev->id, ret);
         goto error;
     }
 
@@ -217,6 +274,22 @@ ops_xp_dev_init(struct xpliant_dev * const dev, void *aux)
         goto error;
     } else { /* POLL */
         VLOG_INFO("XPliant device polling RX mode");
+    }
+
+    /* Initialize host interface. */
+    ops_xp_host_init(dev, ops_xp_host_if_type_get());
+
+    dev->vlan_mgr = ops_xp_vlan_mgr_create(dev->id);
+    if (!dev->vlan_mgr) {
+        VLOG_ERR("Unable to create VLAN manager");
+        goto error;
+    }
+
+    dev->ml = ops_xp_mac_learning_create(dev,
+                                         XP_ML_ENTRY_DEFAULT_IDLE_TIME);
+    if (!dev->ml) {
+        VLOG_ERR("Unable to create mac learning feature");
+        goto error;
     }
 
     /* Register fatal signal handler. */
@@ -230,6 +303,8 @@ ops_xp_dev_init(struct xpliant_dev * const dev, void *aux)
     /* Create event processing thread */
     dev->event_thread = xp_dev_event_handler_create(dev);
     VLOG_INFO("XPliant device's event processing thread started");
+
+    ops_xp_dev_system_defaults_set(dev);
 
     dev->init_done = true;
 
@@ -279,6 +354,9 @@ ops_xp_dev_free(struct xpliant_dev * const dev)
              * atomic variable? */
         }
 
+        ops_xp_mac_learning_unref(dev->ml);
+        ops_xp_vlan_mgr_unref(dev->vlan_mgr);
+
         /* Stop rxq thread */
         latch_set(&dev->exit_latch);
         if (dev->rx_mode == POLL) {
@@ -293,6 +371,12 @@ ops_xp_dev_free(struct xpliant_dev * const dev)
         latch_destroy(&dev->exit_latch);
         latch_poll(&dev->rxq_latch);
         latch_destroy(&dev->rxq_latch);
+
+        ovs_rwlock_destroy(&dev->odp_to_ofport_lock);
+        hmap_destroy(&dev->odp_to_ofport_map);
+
+        ovs_rwlock_destroy(&dev->if_id_to_name_lock);
+        hmap_destroy(&dev->if_id_to_name_map);
 
         gXpDev[dev->id] = NULL;
 
@@ -611,4 +695,88 @@ ops_xp_dev_get_port_info(struct xpliant_dev * const xpdev, xpsPort_t port_num)
     }
 
     return NULL;
+}
+
+/* Creates interface ID to name mapping. */
+int
+ops_xp_dev_add_intf_entry(struct xpliant_dev *xpdev, xpsInterfaceId_t intf_id,
+                          char *intf_name, uint32_t vni)
+{
+    if (xpdev) {
+        struct xp_if_id_to_name_entry *e;
+        struct hmap_node *node;
+
+        ovs_rwlock_rdlock(&xpdev->if_id_to_name_lock);
+
+        node = hmap_first_with_hash(&xpdev->if_id_to_name_map, intf_id);
+        if (node) {
+            ovs_rwlock_unlock(&xpdev->if_id_to_name_lock);
+            return EEXIST;
+        }
+
+        ovs_rwlock_unlock(&xpdev->if_id_to_name_lock);
+
+        e = xzalloc(sizeof(*e));
+        e->intf_name = xstrdup(intf_name);
+
+        ovs_rwlock_wrlock(&xpdev->if_id_to_name_lock);
+        hmap_insert(&xpdev->if_id_to_name_map, &e->hmap_node, intf_id);
+        ovs_rwlock_unlock(&xpdev->if_id_to_name_lock);
+    }
+}
+
+/* Removes interface ID to name mapping. */
+void
+ops_xp_dev_remove_intf_entry(struct xpliant_dev *xpdev, xpsInterfaceId_t intf_id,
+                             uint32_t vni)
+{
+    if (xpdev) {
+        struct hmap_node *node;
+        struct xp_if_id_to_name_entry *e;
+
+        ovs_rwlock_wrlock(&xpdev->if_id_to_name_lock);
+
+        node = hmap_first_with_hash(&xpdev->if_id_to_name_map, intf_id);
+        if (node) {
+            hmap_remove(&xpdev->if_id_to_name_map, node);
+
+            ovs_rwlock_unlock(&xpdev->if_id_to_name_lock);
+
+            e = CONTAINER_OF(node, struct xp_if_id_to_name_entry,
+                             hmap_node);
+            free(e->intf_name);
+            free(e);
+
+            return;
+        }
+
+        ovs_rwlock_unlock(&xpdev->if_id_to_name_lock);
+    }
+}
+
+/* Returns name of interface if it exists. Otherwise NULL.
+ * Dynamically allocates memory for interface name. */
+char *
+ops_xp_dev_get_intf_name(struct xpliant_dev *xpdev, xpsInterfaceId_t intfId,
+                         uint32_t vni)
+{
+    XP_STATUS status = XP_NO_ERR;
+    char *name = NULL;
+
+    if (xpdev) {
+        struct xp_if_id_to_name_entry *e;
+        struct hmap_node *node;
+
+        ovs_rwlock_rdlock(&xpdev->if_id_to_name_lock);
+
+        node = hmap_first_with_hash(&xpdev->if_id_to_name_map, intfId);
+        if (node) {
+            e = CONTAINER_OF(node, struct xp_if_id_to_name_entry, hmap_node);
+            name = xstrdup(e->intf_name);
+        }
+
+        ovs_rwlock_unlock(&xpdev->if_id_to_name_lock);
+    }
+
+    return name;
 }

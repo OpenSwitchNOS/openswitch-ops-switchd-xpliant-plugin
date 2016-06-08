@@ -31,6 +31,8 @@
 #include <sys/select.h>
 
 #include "ops-xp-util.h"
+#include "openXpsPort.h"
+
 #undef closesocket
 
 #include <socket-util.h>
@@ -516,6 +518,42 @@ ops_xp_net_if_setup(char *intf_name, struct ether_addr *mac)
         VLOG_ERR("Failed to bring up %s interface. (rc=%d)",
                  intf_name, rc);
         return EFAULT;
+    }
+
+    return 0;
+}
+
+int
+ops_xp_port_default_vlan_set(xpsDevice_t dev_id, xpsPort_t port_num,
+                             xpsVlan_t vlan_id)
+{
+    XP_STATUS status = XP_NO_ERR;
+    xpsPortConfig_t port_cfg;
+
+    VLOG_INFO("set_port_vlan_id: port#%u, vid#%u",
+              port_num, vlan_id);
+
+    status = xpsPortGetConfig(dev_id, port_num, &port_cfg);
+    if (status) {
+        VLOG_ERR("Could not get current config "
+                 "for the port: %u. Error code: %d",
+                 port_num, status);
+        return EPERM;
+    }
+
+    if ((port_cfg.pvid != vlan_id) ||
+        (port_cfg.pvidModeAllPkt != 1)) {
+
+        port_cfg.pvidModeAllPkt = 1;
+        port_cfg.pvid = vlan_id;
+
+        status = xpsPortSetConfig(dev_id, port_num, &port_cfg);
+        if (status) {
+            VLOG_ERR("Could not set default VLAN "
+                     "for the port: %u. Error code: %d",
+                     port_num, status);
+            return EPERM;
+        }
     }
 
     return 0;

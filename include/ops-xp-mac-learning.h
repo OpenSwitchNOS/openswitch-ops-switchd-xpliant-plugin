@@ -75,7 +75,6 @@ struct xp_mac_entry {
 /* MAC learning table. */
 struct xp_mac_learning {
     struct hmap table;              /* Learning table. */
-    struct ofproto_xpliant *ofproto;
     unsigned long *flood_vlans;     /* Bitmap of learning disabled VLANs. */
     unsigned int idle_time;         /* Max age before deleting an entry. */
     size_t max_entries;             /* Max number of learned MACs. */
@@ -84,7 +83,7 @@ struct xp_mac_learning {
     pthread_t ml_thread;         /* ML Thread ID. */
     struct latch exit_latch;     /* Tells child threads to exit. */
     struct latch event_latch;    /* Events receiving pipe of child thread. */
-    xpsDevice_t devId;
+    struct xpliant_dev *xpdev;
     /* Tables which store mac learning events destined for main
      * processing in OPS mac-learning-plugin. */
     struct mlearn_hmap mlearn_event_tables[XP_ML_MLEARN_MAX_BUFFERS];
@@ -132,12 +131,12 @@ ops_xp_mac_entry_is_grat_arp_locked(const struct xp_mac_entry *mac)
     return time_now() < mac->grat_arp_lock;
 }
 
-struct xp_mac_learning *ops_xp_mac_learning_create(
-                                    xpsDevice_t dev_id,
-                                    struct ofproto_xpliant *ofproto,
-                                    unsigned int idle_time);
+struct xp_mac_learning *ops_xp_mac_learning_create(struct xpliant_dev *xpdev,
+                                                   unsigned int idle_time);
 struct xp_mac_learning *ops_xp_mac_learning_ref(const struct xp_mac_learning *);
 void ops_xp_mac_learning_unref(struct xp_mac_learning *);
+void ops_xp_mac_learning_on_ofproto_created(struct xp_mac_learning *ml,
+                                            struct ofproto_xpliant *ofproto);
 void ops_xp_mac_learning_set_idle_time(struct xp_mac_learning *ml,
                                        unsigned int idle_time)
     OVS_REQ_WRLOCK(ml->rwlock);

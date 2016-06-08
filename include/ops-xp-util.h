@@ -36,6 +36,7 @@
 #include <fcntl.h>
 
 #include "openXpsInterface.h"
+#include "openXpsTypes.h"
 
 #define STR_EQ(s1, s2) ((s1 != NULL) && (s2 != NULL) && \
                         (strlen((s1)) == strlen((s2))) && \
@@ -161,5 +162,7 @@ bool ops_xp_is_l3_tunnel_intf(xpsInterfaceId_t if_id);
 bool ops_xp_msleep(uint32_t msec);
 int ops_xp_tun_alloc(char *name, int flags);
 int ops_xp_net_if_setup(char *intf_name, struct ether_addr *mac);
+int ops_xp_port_default_vlan_set(xpsDevice_t dev_id, xpsPort_t port_num,
+                                 xpsVlan_t vlan_id);
 
 #endif /* ops-xp-util.h */

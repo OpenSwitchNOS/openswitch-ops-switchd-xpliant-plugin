@@ -30,6 +30,8 @@
 #include <hmap.h>
 #include "openXpsInterface.h"
 
+struct xpliant_dev;
+
 typedef enum {
     XP_HOST_IF_KNET,
     XP_HOST_IF_TAP,
@@ -37,16 +39,16 @@ typedef enum {
 } xp_host_if_type_t;
 
 struct xp_host_if_api {
-    int (*init)(xpsDevice_t unit);
-    void (*deinit)(xpsDevice_t unit);
-    int (*if_create)(xpsDevice_t unit, char *name,
+    int (*init)(struct xpliant_dev *xp_dev);
+    void (*deinit)(struct xpliant_dev *xp_dev);
+    int (*if_create)(struct xpliant_dev *xp_dev, char *name,
                      xpsInterfaceId_t xps_if_id,
                      struct ether_addr *mac, int *knet_if_id);
-    int (*if_delete)(xpsDevice_t unit, int knet_if_id);
-    int (*if_filter_create)(char *name, xpsDevice_t unit,
+    int (*if_delete)(struct xpliant_dev *xp_dev, int knet_if_id);
+    int (*if_filter_create)(char *name, struct xpliant_dev *xp_dev,
                             xpsInterfaceId_t xps_if_id,
                             int knet_if_id, int *knet_filter_id);
-    int (*if_filter_delete)(xpsDevice_t unit,
+    int (*if_filter_delete)(struct xpliant_dev *xp_dev,
                             int knet_filter_id);
 };
 
@@ -55,16 +57,16 @@ struct xp_host_if_info {
     void *data;
 };
 
-int ops_xp_host_init(xpsDevice_t unit, xp_host_if_type_t type);
-void ops_xp_host_deinit(xpsDevice_t unit);
-int ops_xp_host_if_create(xpsDevice_t unit, char *name,
+int ops_xp_host_init(struct xpliant_dev *xp_dev, xp_host_if_type_t type);
+void ops_xp_host_deinit(struct xpliant_dev *xp_dev);
+int ops_xp_host_if_create(struct xpliant_dev *xp_dev, char *name,
                           xpsInterfaceId_t xps_if_id,
                           struct ether_addr *mac, int *knet_if_id);
-int ops_xp_host_if_delete(xpsDevice_t unit, int knet_if_id);
-void ops_xp_host_port_filter_create(char *name, xpsDevice_t unit,
+int ops_xp_host_if_delete(struct xpliant_dev *xp_dev, int knet_if_id);
+void ops_xp_host_port_filter_create(char *name, struct xpliant_dev *xp_dev,
                                     xpsInterfaceId_t xps_if_id,
                                     int knet_if_id, int *knet_filter_id);
-void ops_xp_host_filter_delete(char *name, xpsDevice_t unit,
+void ops_xp_host_filter_delete(char *name, struct xpliant_dev *xp_dev,
                                int knet_filter_id);
 
 #endif /* ops-xp-host.h */

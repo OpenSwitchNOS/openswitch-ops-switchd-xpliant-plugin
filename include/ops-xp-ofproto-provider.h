@@ -143,8 +143,6 @@ struct bundle_xpliant *bundle_lookup(const struct ofproto_xpliant *ofproto,
 
 xpsInterfaceId_t ops_xp_get_ofport_intf_id(const struct ofport_xpliant *port);
 xpsPort_t ops_xp_get_ofport_number(const struct ofport_xpliant *port);
-char *ops_xp_get_iface_name(struct ofproto_xpliant* ofproto,
-                            xpsInterfaceId_t intfId, uint32_t vni);
 struct ofproto_xpliant *ops_xp_ofproto_lookup(const char *name);
 
 #endif /* ops-xp-ofproto-provider.h */
