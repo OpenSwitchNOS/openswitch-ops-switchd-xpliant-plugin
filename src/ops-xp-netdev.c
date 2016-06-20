@@ -183,8 +183,8 @@ netdev_xpliant_construct(struct netdev *netdev_)
     netdev->subintf_parent_name = NULL;
     netdev->subintf_vlan_id = 0;
 
-    netdev->knet_if_id = 0;
-    netdev->knet_port_filter_id = 0;
+    netdev->xpnet_if_id = 0;
+    netdev->xpnet_port_filter_id = 0;
 
     n = atomic_count_inc(&next_n);
     netdev->hwaddr[0] = 0xaa;
@@ -212,11 +212,11 @@ netdev_xpliant_destruct(struct netdev *netdev_)
 
     ovs_mutex_lock(&xp_netdev_list_mutex);
 
-    if (netdev->knet_if_id) {
-        retval = ops_xp_host_if_delete(netdev->xpdev, netdev->knet_if_id);
+    if (netdev->xpnet_if_id) {
+        retval = ops_xp_host_if_delete(netdev->xpdev, netdev->xpnet_if_id);
 
         if (retval) {
-            VLOG_ERR("Failed to delete kernel KNET interface %s",
+            VLOG_ERR("Failed to delete kernel XPNET interface %s",
                      netdev->up.name);
         }
     }
@@ -334,6 +334,7 @@ netdev_xpliant_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
         port_info->name = xstrdup(netdev->up.name);
         port_info->hw_enable = false;
         port_info->port_mac_mode = MAC_MODE_MAX_VAL;
+        port_info->serdes_tuned = false;
 
 
         /* For all the ports that can be split into multiple
@@ -371,9 +372,20 @@ netdev_xpliant_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
             }
         }
 
+        /* Add the port to the default VLAN. This will allow it to trap LACP 
+         * frames in case it becomes member of a dynamic LAG.*/
+        rc = ops_xp_vlan_member_add(netdev->xpdev->vlan_mgr,
+                                    XP_DEFAULT_VLAN_ID, netdev->ifId,
+                                    XP_L2_ENCAP_DOT1Q_UNTAGGED, 0);
+        if (rc != XP_NO_ERR) {
+            VLOG_ERR("%s: could not add interface: %u to default vlan: %d"
+                     "Err=%d", __FUNCTION__, netdev->ifId,
+                     XP_DEFAULT_VLAN_ID, rc);
+        }
+
         rc = ops_xp_host_if_create(netdev->xpdev, netdev->up.name,
                                    netdev->ifId, ether_mac,
-                                   &netdev->knet_if_id);
+                                   &netdev->xpnet_if_id);
 
         if (rc) {
             VLOG_ERR("Failed to initialize interface %s", netdev->up.name);
@@ -463,14 +475,14 @@ is_port_config_changed(const struct port_cfg *cur_pcfg, const struct port_cfg *p
 static void
 handle_xp_host_port_filters(struct netdev_xpliant *netdev, int enable)
 {
-    if ((enable == true) && (netdev->knet_port_filter_id == 0)) {
+    if ((enable == true) && (netdev->xpnet_port_filter_id == 0)) {
         ops_xp_host_port_filter_create(netdev->up.name, netdev->xpdev,
-                                       netdev->ifId, netdev->knet_if_id,
-                                       &netdev->knet_port_filter_id);
-    } else if ((enable == false) && (netdev->knet_port_filter_id != 0)) {
+                                       netdev->ifId, netdev->xpnet_if_id,
+                                       &netdev->xpnet_port_filter_id);
+    } else if ((enable == false) && (netdev->xpnet_port_filter_id != 0)) {
         ops_xp_host_filter_delete(netdev->up.name, netdev->xpdev,
-                                  netdev->knet_port_filter_id);
-        netdev->knet_port_filter_id = 0;
+                                  netdev->xpnet_port_filter_id);
+        netdev->xpnet_port_filter_id = 0;
     }
 }
 

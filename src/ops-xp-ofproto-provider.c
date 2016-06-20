@@ -396,6 +396,10 @@ ofproto_xpliant_run(struct ofproto *ofproto_)
         if (timer_expired(&ofproto->ml->mlearn_timer)) {
             ops_xp_mac_learning_on_mlearn_timer_expired(ofproto->ml);
         }
+
+        if (timer_expired(&ofproto->ml->idle_timer)) {
+            ops_xp_mac_learning_on_idle_timer_expired(ofproto->ml);
+        }
     }
 
     return 0;
@@ -1063,6 +1067,7 @@ static void
 bundle_del_port(struct ofport_xpliant *port)
 {
     struct bundle_xpliant *bundle = port->bundle;
+    int rc = 0;
 
     VLOG_INFO("bundle_del_port: bundle.%s, netdev.%s",
               bundle ? bundle->name : "_",
@@ -1073,6 +1078,38 @@ bundle_del_port(struct ofport_xpliant *port)
     bundle->ports_updated = true;
 
     bundle_update(bundle);
+
+    /* As the port is no longer member of any VLAN need to add it to the default
+     * one. This will allow it to trap LACP frames in case it becomes member of
+     * a dynamic LAG. */
+    if (is_xpliant_class(netdev_get_class(port->up.netdev))) {
+
+        struct netdev_xpliant *netdev = netdev_xpliant_cast(port->up.netdev);
+
+        if (!ops_xp_vlan_port_is_member(netdev->xpdev->vlan_mgr,
+                                        XP_DEFAULT_VLAN_ID,
+                                        netdev->ifId)) {
+            rc = ops_xp_vlan_member_add(netdev->xpdev->vlan_mgr,
+                                        XP_DEFAULT_VLAN_ID, netdev->ifId,
+                                        XP_L2_ENCAP_DOT1Q_UNTAGGED, 0);
+            if (rc) {
+                VLOG_ERR("%s: Could not add interface: %u to default vlan: %d "
+                         "Err=%d", __FUNCTION__, netdev->ifId,
+                         XP_DEFAULT_VLAN_ID, rc);
+                return;
+            }
+        } else {
+            rc = ops_xp_vlan_member_set_tagging(netdev->xpdev->vlan_mgr,
+                                                XP_DEFAULT_VLAN_ID,
+                                                netdev->ifId,
+                                                false, 0);
+            if (rc) {
+                VLOG_ERR("%s: Could set interface: %u tagging "
+                         "on default vlan: %d Err=%d", __FUNCTION__,
+                         netdev->ifId, XP_DEFAULT_VLAN_ID, rc);
+            }
+        }
+    }
 }
 
 static bool
@@ -1119,6 +1156,7 @@ bundle_update_vlan_config(struct ofproto_xpliant *ofproto,
     xpsVlan_t old_vlan = 0;
     enum port_vlan_mode old_vlan_mode;
     unsigned long *trunks = NULL;
+    xpsPortFrameType_e frame_type = FRAMETYPE_ALL;
     int retVal = 0;
 
     ovs_assert(ofproto);
@@ -1126,8 +1164,21 @@ bundle_update_vlan_config(struct ofproto_xpliant *ofproto,
     ovs_assert(s);
     ovs_assert(need_flush);
 
-    old_vlan = (bundle->vlan  != -1) ? bundle->vlan : XP_DEFAULT_VLAN_ID;
+    old_vlan = (bundle->vlan != -1) ? bundle->vlan : XP_DEFAULT_VLAN_ID;
     old_vlan_mode = bundle->vlan_mode;
+
+    /* On system init each physical port is added to a default VLAN in order to
+     * make LACP packets not dropped in pipeline. We have to reflect this in 
+     * bundle vlan membership bitmap. */
+    if ((bundle->vlan == -1) && (s->n_slaves == 1) &&
+        ops_xp_vlan_port_is_member(ofproto->vlan_mgr, XP_DEFAULT_VLAN_ID,
+                                   bundle->intfId)) {
+        if (!bundle->trunks) {
+            bundle->trunks = bitmap_allocate(XP_VLAN_MAX_COUNT);
+        }
+
+        bitmap_set1(bundle->trunks, XP_DEFAULT_VLAN_ID);
+    }
 
     /* NOTE: "bundle" holds previous VLAN configuration (if any).
      * "s" holds current desired VLAN configuration. */
@@ -1160,6 +1211,7 @@ bundle_update_vlan_config(struct ofproto_xpliant *ofproto,
     case PORT_VLAN_ACCESS:
         trunks = bitmap_allocate(XP_VLAN_MAX_COUNT);
         bitmap_set1(trunks, vlan);
+        frame_type = FRAMETYPE_UN_PRI;
         break;
 
     case PORT_VLAN_TRUNK:
@@ -1250,6 +1302,15 @@ bundle_update_vlan_config(struct ofproto_xpliant *ofproto,
 
         /*VLOG_DBG("%s(%d) bundle->vlan %d, bundle->trunks: %x",
                  __FUNCTION__, __LINE__, bundle->vlan, *bundle->trunks);*/
+
+        retVal = xpsPortSetField(ofproto->xpdev->id, bundle->intfId,
+                                 XPS_PORT_ACCEPTED_FRAME_TYPE, frame_type);
+        if (retVal != XP_NO_ERR) {
+            VLOG_ERR("%s: Could not set frametype in interface %d. "
+                     "Error code: %d\n", 
+                     __FUNCTION__, bundle->intfId, retVal);
+            return EPERM;
+        }
 
         /* Update PVID */
         LIST_FOR_EACH (port, bundle_node, &bundle->ports) {
@@ -1896,10 +1957,28 @@ ofproto_xpliant_bundle_set(struct ofproto *ofproto_, void *aux,
         struct ofport_xpliant *port;
         xpsVlan_t vlan_id = 0;
         const char *type = NULL;
+        xpsInterfaceId_t intf_id = XPS_INTF_INVALID_ID;
 
         port = get_ofp_port(bundle->ofproto, s->slaves[0]);
         if (!port) {
             VLOG_ERR("slave is not in the ports");
+        }
+
+        intf_id = ops_xp_get_ofport_intf_id(port);
+
+        /* Remove port from default VLAN. */
+        if (!bundle->l3_intf &&
+            (intf_id != XPS_INTF_INVALID_ID) &&
+            ops_xp_vlan_port_is_member(ofproto->vlan_mgr, XP_DEFAULT_VLAN_ID,
+                                       intf_id)) {
+
+            ret_val = ops_xp_vlan_member_remove(ofproto->vlan_mgr,
+                                                XP_DEFAULT_VLAN_ID,
+                                                intf_id);
+            if (ret_val) {
+                VLOG_ERR("%s, Could not remove interface: %u from default VLAN",
+                         __FUNCTION__, intf_id);
+            }
         }
 
         type = netdev_get_type(port->up.netdev);
@@ -2044,6 +2123,19 @@ ofproto_xpliant_bundle_remove(struct ofport *port_)
               bundle ? bundle->ofproto->up.name : "_",
               bundle ? bundle->ofproto->up.type : "_");
 
+    if (bundle && (bundle->intfId != XPS_INTF_INVALID_ID)) {
+        XP_STATUS retVal = xpsPortSetField(bundle->ofproto->xpdev->id, 
+                                           bundle->intfId,
+                                           XPS_PORT_ACCEPTED_FRAME_TYPE, 
+                                           FRAMETYPE_ALL);
+        if (retVal != XP_NO_ERR) {
+            VLOG_ERR("%s: Could not set frametype in interface %d. "
+                     "Error code: %d\n", 
+                     __FUNCTION__, bundle->intfId, retVal);
+            return;
+        }
+    }
+
     if (bundle) {
         bundle_del_port(port);
         if (list_is_empty(&bundle->ports)) {
@@ -2063,12 +2155,15 @@ ofproto_xpliant_set_vlan(struct ofproto *ofproto_, int vid, bool add)
     VLOG_INFO("%s: vid=%d, oper=%s", __FUNCTION__, vid, (add ? "add" : "del"));
 
     if (add) {
-        /* Create VLAN */
-        error = ops_xp_vlan_create(ofproto->vlan_mgr, (xpsVlan_t)vid);
-        if (error) {
-            return error;
+        /* Default VLAN is created on system init so no need to do this again.*/
+        if (vid != XP_DEFAULT_VLAN_ID) {
+            /* Create VLAN */
+            error = ops_xp_vlan_create(ofproto->vlan_mgr, (xpsVlan_t)vid);
+            if (error) {
+                return error;
+            }
+            ops_xp_vlan_set_created_by_user(ofproto->vlan_mgr, (xpsVlan_t)vid, true);
         }
-        ops_xp_vlan_set_created_by_user(ofproto->vlan_mgr, (xpsVlan_t)vid, true);
 
         /* Add this VLAN to any port specified by 'trunks' map */
         HMAP_FOR_EACH (bundle, hmap_node, &ofproto->bundles) {
@@ -2078,11 +2173,24 @@ ofproto_xpliant_set_vlan(struct ofproto *ofproto_, int vid, bool add)
                                           ? XP_L2_ENCAP_DOT1Q_TAGGED
                                           : XP_L2_ENCAP_DOT1Q_UNTAGGED;
 
-                status = ops_xp_vlan_member_add(ofproto->vlan_mgr,
-                                                (xpsVlan_t)vid,
-                                                bundle->intfId, encapType, 0);
+                if ((vid == XP_DEFAULT_VLAN_ID) &&
+                    ops_xp_vlan_port_is_member(ofproto->vlan_mgr,
+                                               (xpsVlan_t)vid,
+                                                bundle->intfId)) {
+
+                    status = ops_xp_vlan_member_set_tagging(
+                                      ofproto->vlan_mgr,
+                                      XP_DEFAULT_VLAN_ID,
+                                      bundle->intfId,
+                                      encapType == XP_L2_ENCAP_DOT1Q_TAGGED, 0);
+                } else {
+                    status = ops_xp_vlan_member_add(ofproto->vlan_mgr,
+                                                    (xpsVlan_t)vid,
+                                                    bundle->intfId, encapType, 0);
+                }
+
                 if (status) {
-                	return EPERM;
+                    return EPERM;
                 }
             }
         }
@@ -2090,9 +2198,22 @@ ofproto_xpliant_set_vlan(struct ofproto *ofproto_, int vid, bool add)
         /* Delete this VLAN from any port specified by 'trunks' map */
         HMAP_FOR_EACH (bundle, hmap_node, &ofproto->bundles) {
             if (bundle->trunks && bitmap_is_set(bundle->trunks, vid)) {
-                status = ops_xp_vlan_member_remove(ofproto->vlan_mgr,
-                                                   (xpsVlan_t)vid,
-                                                   bundle->intfId);
+                if ((vid == XP_DEFAULT_VLAN_ID)) {
+                    if (ops_xp_vlan_port_is_tagged_member(ofproto->vlan_mgr,
+                                                          (xpsVlan_t)vid,
+                                                          bundle->intfId)) {
+
+                        status = ops_xp_vlan_member_set_tagging(ofproto->vlan_mgr,
+                                                                XP_DEFAULT_VLAN_ID,
+                                                                bundle->intfId,
+                                                                false, 0);
+                    }
+                } else {
+                    status = ops_xp_vlan_member_remove(ofproto->vlan_mgr,
+                                                       (xpsVlan_t)vid,
+                                                       bundle->intfId);
+                }
+
                 if (status) {
                     return EPERM;
                 }
@@ -2101,7 +2222,8 @@ ofproto_xpliant_set_vlan(struct ofproto *ofproto_, int vid, bool add)
 
         ops_xp_vlan_set_created_by_user(ofproto->vlan_mgr,(xpsVlan_t)vid, false);
         /* Remove VLAN only if no l3 interfaces are still using it */
-        if (ops_xp_vlan_is_membership_empty(ofproto->vlan_mgr, (xpsVlan_t)vid)) {
+        if (ops_xp_vlan_is_membership_empty(ofproto->vlan_mgr, (xpsVlan_t)vid)
+            && (vid != XP_DEFAULT_VLAN_ID)) {
             error = ops_xp_vlan_remove(ofproto->vlan_mgr, (xpsVlan_t)vid);
             if (error) {
                 return error;
@@ -2716,6 +2838,37 @@ xp_unixctl_fdb_remove_entry(struct unixctl_conn *conn, int argc OVS_UNUSED,
 }
 
 static void
+xp_unixctl_fdb_configure_aging(struct unixctl_conn *conn, int argc,
+                               const char *argv[], void *aux OVS_UNUSED)
+{
+    const struct ofproto_xpliant *ofproto = NULL;
+    unsigned int idle_time;
+    int status;
+
+    /* Get bridge */
+    ofproto = ops_xp_ofproto_lookup(argv[1]);
+    if (!ofproto) {
+        unixctl_command_reply_error(conn, "no such bridge");
+        return;
+    }
+
+    /* Get Age time. */
+    status = ovs_scan(argv[2], "%"SCNu32, &idle_time);
+    if (!status) {
+        unixctl_command_reply_error(conn, "invalid age cycle unit time");
+        return;
+    }
+
+    status = ops_xp_mac_learning_set_idle_time(ofproto->ml, idle_time);
+    if (status) {
+        unixctl_command_reply_error(conn, "failed to set idle time");
+        return;
+    }
+
+    unixctl_command_reply(conn, "FDB aging time been update successfully");
+}
+
+static void
 xp_unixctl_port_serdes_tune(struct unixctl_conn *conn, int argc,
                             const char *argv[], void *aux OVS_UNUSED)
 {
@@ -2914,6 +3067,8 @@ ofproto_xpliant_unixctl_init(void)
                              4, 5, xp_unixctl_fdb_add_entry, NULL);
     unixctl_command_register("xp/fdb/remove-entry", "bridge vlan mac",
                              3, 3, xp_unixctl_fdb_remove_entry, NULL);
+    unixctl_command_register("xp/fdb/set-age", "bridge idle_time",
+                             2, 2, xp_unixctl_fdb_configure_aging, NULL);
 
     unixctl_command_register(
         "xp/port/serdes/tune", "bridge start_port [end_port [mode]]",

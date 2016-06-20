@@ -91,8 +91,8 @@ static int tap_init(struct xpliant_dev *xp_dev);
 static void tap_deinit(struct xpliant_dev *xp_dev);
 static int tap_if_create(struct xpliant_dev *xp_dev, char *name,
                          xpsInterfaceId_t xps_if_id,
-                         struct ether_addr *mac, int *knet_if_id);
-static int tap_if_delete(struct xpliant_dev *xp_dev, int knet_if_id);
+                         struct ether_addr *mac, int *xpnet_if_id);
+static int tap_if_delete(struct xpliant_dev *xp_dev, int xpnet_if_id);
 static int tap_if_filter_create(char *name, struct xpliant_dev *xp_dev,
                                 xpsInterfaceId_t xps_if_id,
                                 int host_if_id, int *host_filter_id);
@@ -185,7 +185,7 @@ tap_deinit(struct xpliant_dev *xp_dev)
     close(info->exit_fds[0]);
     close(info->exit_fds[1]);
 
-    /* Remove knet interfaces. */
+    /* Remove xpnet interfaces. */
     HMAP_FOR_EACH_SAFE (e, next, fd_node, &info->fd_to_tap_if_map) {
         tap_if_delete(xp_dev, e->fd);
     }
@@ -582,8 +582,7 @@ tap_packet_driver_cb(xpsDevice_t devId, xpsPort_t portNum,
 
     ovs_mutex_unlock(&info->mutex);
 
-
-    /* Send a packet to knet interface. */
+    /* Send a packet to xpnet interface. */
     do {
         ret = write(fd, buf, buf_size);
     } while ((ret < 0) && (errno == EINTR));

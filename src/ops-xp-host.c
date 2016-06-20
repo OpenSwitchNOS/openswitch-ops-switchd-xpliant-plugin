@@ -43,7 +43,7 @@ ops_xp_host_init(struct xpliant_dev *xp_dev, xp_host_if_type_t type)
     xp_dev->host_if_info = info;
 
     switch (type) {
-    case XP_HOST_IF_KNET:
+    case XP_HOST_IF_XPNET:
         info->exec = &xp_host_netdev_api;
         info->data = NULL;
         break;
@@ -84,7 +84,7 @@ ops_xp_host_deinit(struct xpliant_dev *xp_dev)
 int
 ops_xp_host_if_create(struct xpliant_dev *xp_dev, char *name,
                       xpsInterfaceId_t xps_if_id, struct ether_addr *mac,
-                      int *knet_if_id)
+                      int *xpnet_if_id)
 {
     struct xp_host_if_info *info;
     int rc = EOPNOTSUPP;
@@ -94,7 +94,7 @@ ops_xp_host_if_create(struct xpliant_dev *xp_dev, char *name,
 
     info = xp_dev->host_if_info;
     if (info->exec->if_create) {
-        rc = info->exec->if_create(xp_dev, name, xps_if_id, mac, knet_if_id);
+        rc = info->exec->if_create(xp_dev, name, xps_if_id, mac, xpnet_if_id);
     }
 
     return rc;
@@ -102,7 +102,7 @@ ops_xp_host_if_create(struct xpliant_dev *xp_dev, char *name,
 
 /* Deletes HOST virtual interface. */
 int
-ops_xp_host_if_delete(struct xpliant_dev *xp_dev, int knet_if_id)
+ops_xp_host_if_delete(struct xpliant_dev *xp_dev, int xpnet_if_id)
 {
     struct xp_host_if_info *info;
     int rc = EOPNOTSUPP;
@@ -112,7 +112,7 @@ ops_xp_host_if_delete(struct xpliant_dev *xp_dev, int knet_if_id)
 
     info = xp_dev->host_if_info;
     if (info->exec->if_delete) {
-        rc = info->exec->if_delete(xp_dev, knet_if_id);
+        rc = info->exec->if_delete(xp_dev, xpnet_if_id);
     }
 
     return rc;
@@ -121,7 +121,7 @@ ops_xp_host_if_delete(struct xpliant_dev *xp_dev, int knet_if_id)
 void
 ops_xp_host_port_filter_create(char *name, struct xpliant_dev *xp_dev,
                                xpsInterfaceId_t xps_if_id,
-                               int knet_if_id, int *knet_filter_id)
+                               int xpnet_if_id, int *xpnet_filter_id)
 {
     struct xp_host_if_info *info;
 
@@ -130,14 +130,14 @@ ops_xp_host_port_filter_create(char *name, struct xpliant_dev *xp_dev,
 
     info = xp_dev->host_if_info;
     if (info->exec->if_filter_create) {
-        info->exec->if_filter_create(name, xp_dev, xps_if_id, knet_if_id,
-                                     knet_filter_id);
+        info->exec->if_filter_create(name, xp_dev, xps_if_id, xpnet_if_id,
+                                     xpnet_filter_id);
     }
 }
 
 void
 ops_xp_host_filter_delete(char *name, struct xpliant_dev *xp_dev,
-                          int knet_filter_id)
+                          int xpnet_filter_id)
 {
     struct xp_host_if_info *info;
 
@@ -146,6 +146,6 @@ ops_xp_host_filter_delete(char *name, struct xpliant_dev *xp_dev,
 
     info = xp_dev->host_if_info;
     if (info->exec->if_filter_delete) {
-        info->exec->if_filter_delete(xp_dev, knet_filter_id);
+        info->exec->if_filter_delete(xp_dev, xpnet_filter_id);
     }
 }

@@ -38,6 +38,7 @@
 #include "openXpsPolicer.h"
 #include "openXpsMac.h"
 #include "ops-xp-dev-init.h"
+#include "ops-xp-mac-learning.h"
 
 VLOG_DEFINE_THIS_MODULE(xp_port);
 
@@ -47,7 +48,7 @@ VLOG_DEFINE_THIS_MODULE(xp_port);
 int
 ops_xp_port_mac_mode_set(struct xp_port_info *p_info, xpMacConfigMode mac_mode)
 {
-    XP_STATUS xp_rc = XP_NO_ERR;
+    XP_STATUS status = XP_NO_ERR;
     uint8_t mac_num;
     int i = 0;
 
@@ -64,32 +65,32 @@ ops_xp_port_mac_mode_set(struct xp_port_info *p_info, xpMacConfigMode mac_mode)
 
     /* Get port group */
     XP_LOCK();
-    xp_rc = xpsMacGetMacNumForPortNum(p_info->id, p_info->port_num,
-                                      &mac_num);
-    if (xp_rc != XP_NO_ERR) {
+    status = xpsMacGetMacNumForPortNum(p_info->id, p_info->port_num, &mac_num);
+    if (status != XP_NO_ERR) {
         XP_UNLOCK();
         VLOG_ERR("%s: unable to get MAC number for port %u. Err=%u",
-                 __FUNCTION__, p_info->port_num, xp_rc);
+                 __FUNCTION__, p_info->port_num, status);
         return EFAULT;
     }
 
     /* Switch to new MAC mode */
-    xp_rc = xpsMacSwitchMacConfigMode(p_info->id, mac_num, mac_mode, 
-                                      RS_FEC_MODE, (mac_mode == MAC_MODE_1X100GB));
+    status = xpsMacSwitchMacConfigMode(p_info->id, mac_num, mac_mode,
+                                       RS_FEC_MODE,
+                                       (mac_mode == MAC_MODE_1X100GB));
     XP_UNLOCK();
-    if (xp_rc != XP_NO_ERR) {
+    if (status != XP_NO_ERR) {
         VLOG_ERR("%s: unable to set %u MAC mode. Err=%u",
-                 __FUNCTION__, mac_mode, xp_rc);
+                 __FUNCTION__, mac_mode, status);
         return EFAULT;
     }
 
     p_info->port_mac_mode = mac_mode;
+    p_info->serdes_tuned = false;
 
     return 0;
 
 }
 
-#if (XP_DEV_EVENT_MODE == XP_DEV_EVENT_MODE_POLL)
 /* The handler that will process port link status related activities
  * in polling mode. It cyclically polls ports for link status and
  * calls netdev link state callback if port link state changes */
@@ -99,41 +100,81 @@ ops_xp_port_event_handler(void *arg)
     struct xpliant_dev *dev = (struct xpliant_dev *)arg;
     struct netdev_xpliant *netdev = NULL;
     XP_STATUS status;
+    struct xp_port_info *port_info;
+    uint8_t link_status;
+#if (XP_DEV_EVENT_MODE == XP_DEV_EVENT_MODE_POLL)
     uint8_t link;
+#endif /* XP_DEV_EVENT_MODE */
     uint32_t port;
 
     for (;;) {
+        /* Sleep for a while */
+        ops_xp_msleep(XP_PORT_LINK_POLL_INTERVAL);
+
+        /* Iterate over all enabled ports */
         for (port = 0; port < XP_MAX_TOTAL_PORTS; port++) {
-            /* Sleep for a while before going to next port.
-             * Execute sleep here to handle case when port is skipped via
-             * 'continue' */
-            ops_xp_msleep(XP_PORT_LINK_POLL_INTERVAL / XP_MAX_TOTAL_PORTS);
-
             netdev = ops_xp_netdev_from_port_num(dev->id, port);
+            if (netdev) {
+                ovs_mutex_lock(&netdev->mutex);
+                /* Skip if no netdev, netdev is not initialized or netdev is
+                 * disabled */
+                if (!netdev->intf_initialized || !netdev->pcfg.enable) {
+                    ovs_mutex_unlock(&netdev->mutex);
+                    continue;
+                }
 
-            /* Skip if no netdev, netdev is not initialized or netdev is disabled */
-            if (!netdev || !netdev->intf_initialized || !netdev->pcfg.enable) {
-                continue;
-            }
+                link_status = netdev->link_status;
+                port_info = netdev->port_info;
+                ovs_mutex_unlock(&netdev->mutex);
 
-            XP_LOCK();
-            status = xpsMacGetLinkStatus(netdev->xpdev->id,
-                                         netdev->port_num, &link);
-            XP_UNLOCK();
-            if (status != XP_NO_ERR) {
-                VLOG_WARN("%s: could not get %u port link status. Err=%d",
-                          __FUNCTION__, netdev->port_num, status);
-            }
+#if (XP_DEV_EVENT_MODE == XP_DEV_EVENT_MODE_POLL)
+                XP_LOCK();
+                status = xpsMacGetLinkStatus(port_info->id,
+                                             port_info->port_num, &link);
+                XP_UNLOCK();
+                if (status != XP_NO_ERR) {
+                    VLOG_WARN("%s: could not get %u port link status. Err=%d",
+                              __FUNCTION__, port_info->port_num, status);
+                }
 
-            if (netdev->link_status != !!link) {
-                ops_xp_netdev_link_state_callback(netdev, link);
+                if (link_status != !!link) {
+                    ops_xp_netdev_link_state_callback(netdev, link);
+                }
+#endif /* XP_DEV_EVENT_MODE */
+
+                /* If port tuning has not been done yet, then try to tune the port */
+                if (!port_info->serdes_tuned) {
+                    XP_LOCK();
+                    status = xpsMacPortSerdesTuneConditionGet(port_info->id,
+                                                              port_info->port_num);
+                    if (status == XP_NO_ERR) {
+                        status = xpsMacPortSerdesTune(port_info->id,
+                                                      &port_info->port_num, 1,
+                                                      DFE_ICAL, 0);
+                        if (status != XP_NO_ERR) {
+                            VLOG_WARN("%s: could not tune serdes for port %u. Err=%d",
+                                      __FUNCTION__, port_info->port_num, status);
+                        }
+                        /* Apply additional handling for 100G ports */
+                        if (port_info->port_mac_mode == MAC_MODE_1X100GB) {
+                            status = xpsMacPortSerdesSignalOverride(port_info->id,
+                                                                    port_info->port_num, 1);
+                            status = xpsMacPortSerdesSignalOverride(port_info->id,
+                                                                    port_info->port_num, 0);
+                        }
+
+                        port_info->serdes_tuned = true;
+                    }
+                    XP_UNLOCK();
+                }
             }
         }
     }
 
     return NULL;
 }
-#else /* (XP_DEV_EVENT_MODE == XP_DEV_EVENT_MODE_INTERRUPT) */
+
+#if (XP_DEV_EVENT_MODE == XP_DEV_EVENT_MODE_INTERRUPT)
 static void
 port_on_link_up_event(xpsDevice_t dev_id, uint8_t port_num)
 {
@@ -213,7 +254,7 @@ int
 ops_xp_port_set_config(struct netdev_xpliant *netdev,
                        const struct port_cfg *new_cfg)
 {
-    XP_STATUS xp_rc = XP_NO_ERR;
+    XP_STATUS status = XP_NO_ERR;
     xpsPortConfig_t port_config;
     uint8_t link = 0;
     int rc;
@@ -234,31 +275,31 @@ ops_xp_port_set_config(struct netdev_xpliant *netdev,
             }
 
             XP_LOCK();
-            xp_rc = xpsPolicerEnablePortPolicing(netdev->port_num, 0);
-            if (xp_rc != XP_NO_ERR) {
+            status = xpsPolicerEnablePortPolicing(netdev->port_num, 0);
+            if (status != XP_NO_ERR) {
                 VLOG_WARN("%s: unable to disable port policing for %s.",
-                        __FUNCTION__, netdev_get_name(&(netdev->up)));
+                          __FUNCTION__, netdev_get_name(&(netdev->up)));
             }
 #if (XP_DEV_EVENT_MODE == XP_DEV_EVENT_MODE_INTERRUPT)
-            xp_rc = xpsMacEventHandlerDeRegister(netdev->xpdev->id,
-                                                 netdev->port_num, LINK_UP);
-            if (xp_rc != XP_NO_ERR) {
+            status = xpsMacEventHandlerDeRegister(netdev->xpdev->id,
+                                                  netdev->port_num, LINK_UP);
+            if (status != XP_NO_ERR) {
                 VLOG_WARN("%s: unable to deregister LINK_UP event handler for %s.",
                           __FUNCTION__, netdev_get_name(&(netdev->up)));
             }
 
-            xp_rc = xpsMacEventHandlerDeRegister(netdev->xpdev->id,
-                                                 netdev->port_num, LINK_DOWN);
-            if (xp_rc != XP_NO_ERR) {
+            status = xpsMacEventHandlerDeRegister(netdev->xpdev->id,
+                                                  netdev->port_num, LINK_DOWN);
+            if (status != XP_NO_ERR) {
                 VLOG_WARN("Unable to deregister LINK_DOWN event handler for %s.",
                           __FUNCTION__, netdev_get_name(&(netdev->up)));
             }
 
-            xp_rc = xpsMacLinkStatusInterruptEnableSet(netdev->xpdev->id,
-                                                       netdev->port_num, false);
-            if (xp_rc != XP_NO_ERR) {
+            status = xpsMacLinkStatusInterruptEnableSet(netdev->xpdev->id,
+                                                        netdev->port_num, false);
+            if (status != XP_NO_ERR) {
                 VLOG_WARN("%s: failed to disable interrupts on port #%u. Err=%d",
-                          __FUNCTION__, netdev->ifId, xp_rc);
+                          __FUNCTION__, netdev->ifId, status);
             }
 #endif /* XP_DEV_EVENT_MODE */
             XP_UNLOCK();
@@ -270,53 +311,54 @@ ops_xp_port_set_config(struct netdev_xpliant *netdev,
             link_netdev(netdev);
 
             XP_LOCK();
-            xp_rc = xpsPortGetConfig(netdev->xpdev->id, netdev->ifId,
+            status = xpsPortGetConfig(netdev->xpdev->id, netdev->ifId,
                                      &port_config);
-            if (xp_rc != XP_NO_ERR) {
+            if (status != XP_NO_ERR) {
                 XP_UNLOCK();
                 VLOG_ERR("%s: could not set port config for port #%u. Err=%d",
-                         __FUNCTION__, netdev->ifId, xp_rc);
+                         __FUNCTION__, netdev->ifId, status);
                 return EFAULT;
             }
 
             port_config.portState = SPAN_STATE_FORWARD;
-            xp_rc = xpsPortSetConfig(netdev->xpdev->id, netdev->ifId, &port_config);
-            if (xp_rc != XP_NO_ERR) {
+            status = xpsPortSetConfig(netdev->xpdev->id, netdev->ifId,
+                                      &port_config);
+            if (status != XP_NO_ERR) {
                 XP_UNLOCK();
                 VLOG_ERR("%s: could not set port config for port #%u. Err=%d",
-                         __FUNCTION__, netdev->ifId, xp_rc);
+                         __FUNCTION__, netdev->ifId, status);
                 return EFAULT;
             }
 
-            xp_rc = xpsPolicerEnablePortPolicing(netdev->ifId, 1);
-            if (xp_rc != XP_NO_ERR) {
+            status = xpsPolicerEnablePortPolicing(netdev->ifId, 1);
+            if (status != XP_NO_ERR) {
                 VLOG_WARN("%s: unable to enable port policing for port #%u. Err=%d",
-                          __FUNCTION__, netdev->ifId, xp_rc);
+                          __FUNCTION__, netdev->ifId, status);
             }
 #if (XP_DEV_EVENT_MODE == XP_DEV_EVENT_MODE_INTERRUPT)
-            xp_rc = xpsMacEventHandlerRegister(netdev->xpdev->id,
-                                               netdev->port_num, LINK_UP,
-                                               port_on_link_up_event);
-            if (xp_rc != XP_NO_ERR) {
+            status = xpsMacEventHandlerRegister(netdev->xpdev->id,
+                                                netdev->port_num, LINK_UP,
+                                                port_on_link_up_event);
+            if (status != XP_NO_ERR) {
                 VLOG_WARN("%s: unable to register LINK_UP event handler " \
                           "for port #%u. Err=%d",
-                          __FUNCTION__, netdev->ifId, xp_rc);
+                          __FUNCTION__, netdev->ifId, status);
             }
 
-            xp_rc = xpsMacEventHandlerRegister(netdev->xpdev->id,
-                                               netdev->port_num, LINK_DOWN,
-                                               port_on_link_down_event);
-            if (xp_rc != XP_NO_ERR) {
+            status = xpsMacEventHandlerRegister(netdev->xpdev->id,
+                                                netdev->port_num, LINK_DOWN,
+                                                port_on_link_down_event);
+            if (status != XP_NO_ERR) {
                 VLOG_WARN("%s: unable to register LINK_DOWN event handler " \
                           "for port #%u. Err=%d",
-                          __FUNCTION__, netdev->ifId, xp_rc);
+                          __FUNCTION__, netdev->ifId, status);
             }
 
-            xp_rc = xpsMacLinkStatusInterruptEnableSet(netdev->xpdev->id,
-                                                       netdev->port_num, true);
-            if (xp_rc != XP_NO_ERR) {
+            status = xpsMacLinkStatusInterruptEnableSet(netdev->xpdev->id,
+                                                        netdev->port_num, true);
+            if (status != XP_NO_ERR) {
                 VLOG_WARN("%s: failed to enable interrupts on port #%u. Err=%d",
-                          __FUNCTION__, netdev->ifId, xp_rc);
+                          __FUNCTION__, netdev->ifId, status);
             }
 #endif /* XP_DEV_EVENT_MODE */
             XP_UNLOCK();
@@ -331,45 +373,6 @@ ops_xp_port_set_config(struct netdev_xpliant *netdev,
 
     /* Apply port configuration only if port is enabled */
     if (new_cfg->enable == true) {
-        /* Tune serdes if go from disable to enable or
-         * speed configuration changed */
-        if ((netdev->pcfg.speed != new_cfg->speed) ||
-                (netdev->pcfg.enable != new_cfg->enable)) {
-            XP_LOCK();
-            /* Tune serdes to new speed */
-            VLOG_INFO("Serdes %u tuning started", netdev->port_num);
-            xp_rc = xpsMacPortSerdesTune(netdev->xpdev->id, &netdev->port_num, 1,
-                                         DFE_ICAL, 0);
-            VLOG_INFO("Serdes %u tuning finished", netdev->port_num);
-            if (xp_rc != XP_NO_ERR) {
-                VLOG_WARN("Failed to tune serdes on Port %s. Err=%u ",
-                          netdev_get_name(&(netdev->up)), xp_rc);
-            }
-
-            if (new_cfg->speed == 100000) {
-                uint8_t mac_num = XP_MAX_PTGS;
-
-                xp_rc = xpsMacGetMacNumForPortNum(netdev->xpdev->id,
-                                                  netdev->port_num, &mac_num);
-                if (xp_rc != XP_NO_ERR) {
-                    VLOG_WARN("%s: unable to get MAC number for port %u. Err=%u",
-                             __FUNCTION__, netdev->port_num, xp_rc);
-                }
-
-                xp_rc = xpsMacPortGroupDeInit(netdev->xpdev->id, mac_num);
-                if (xp_rc != XP_NO_ERR) {
-                    VLOG_WARN("Failed to deinit MAC for Port %u. Err=%u ",
-                              netdev->port_num, xp_rc);
-                }
-                xp_rc = xpsMacPortGroupInit(netdev->xpdev->id, mac_num, MAC_MODE_1X100GB,
-                                            SPEED_100GB, 0, 0, 0, RS_FEC_MODE, 1);
-                if (xp_rc != XP_NO_ERR) {
-                    VLOG_WARN("Failed to init MAC for Port %u. Err=%u ",
-                              netdev->port_num, xp_rc);
-                }
-            }
-            XP_UNLOCK();
-        }
 #if 0
         if (netdev->pcfg.autoneg != new_cfg->autoneg) {
             xp_rc = xpsMacSetPortAutoNeg(netdev->xpdev->id, netdev->port_num, pcfg.autoneg);
@@ -385,10 +388,10 @@ ops_xp_port_set_config(struct netdev_xpliant *netdev,
         }
 #endif
         XP_LOCK();
-        xp_rc = xpsMacGetLinkStatus(netdev->xpdev->id, netdev->port_num, &link);
-        if (xp_rc != XP_NO_ERR) {
+        status = xpsMacGetLinkStatus(netdev->xpdev->id, netdev->port_num, &link);
+        if (status != XP_NO_ERR) {
             VLOG_WARN("%s: could not get %u port link status. Err=%d",
-                      __FUNCTION__, netdev->port_num, xp_rc);
+                      __FUNCTION__, netdev->port_num, status);
         }
         XP_UNLOCK();
 
@@ -418,17 +421,27 @@ int
 ops_xp_port_set_enable(struct netdev_xpliant *netdev, bool enable)
 {
     struct xp_port_info *port_info = netdev->port_info;
-    XP_STATUS xp_rc = XP_NO_ERR;
+    XP_STATUS status = XP_NO_ERR;
     if (port_info) {
         if (port_info->hw_enable != enable) {
             XP_LOCK();
-            xp_rc = xpsMacPortEnable(port_info->id, port_info->port_num, enable);
+            status = xpsMacPortEnable(port_info->id, port_info->port_num,
+                                      enable);
             XP_UNLOCK();
             port_info->hw_enable = enable;
+
+            if (enable) {
+                /* We must tune port after it is enabled */
+                port_info->serdes_tuned = false;
+            } else {
+                /* Notify ML that port is down */
+                ops_xp_mac_learning_on_port_down(netdev->xpdev->ml,
+                                                 netdev->ifId);
+            }
         }
     } else {
-        xp_rc = XP_ERR_NULL_POINTER;
+        status = XP_ERR_NULL_POINTER;
     }
 
-    return (xp_rc == XP_NO_ERR) ? 0 : EPERM;
+    return (status == XP_NO_ERR) ? 0 : EPERM;
 }

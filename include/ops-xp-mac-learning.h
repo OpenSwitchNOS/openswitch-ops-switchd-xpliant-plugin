@@ -37,6 +37,7 @@
 
 #include "ops-xp-ofproto-provider.h"
 #include "ops-xp-vlan.h"
+#include "openXpsAging.h"
 #include "openXpsFdb.h"
 
 struct xp_mac_learning;
@@ -77,6 +78,7 @@ struct xp_mac_learning {
     struct hmap table;              /* Learning table. */
     unsigned long *flood_vlans;     /* Bitmap of learning disabled VLANs. */
     unsigned int idle_time;         /* Max age before deleting an entry. */
+    struct timer idle_timer;
     size_t max_entries;             /* Max number of learned MACs. */
     struct ovs_refcount ref_cnt;
     struct ovs_rwlock rwlock;
@@ -137,8 +139,8 @@ struct xp_mac_learning *ops_xp_mac_learning_ref(const struct xp_mac_learning *);
 void ops_xp_mac_learning_unref(struct xp_mac_learning *);
 void ops_xp_mac_learning_on_ofproto_created(struct xp_mac_learning *ml,
                                             struct ofproto_xpliant *ofproto);
-void ops_xp_mac_learning_set_idle_time(struct xp_mac_learning *ml,
-                                       unsigned int idle_time)
+int ops_xp_mac_learning_set_idle_time(struct xp_mac_learning *ml,
+                                      unsigned int idle_time)
     OVS_REQ_WRLOCK(ml->rwlock);
 
 void ops_xp_mac_learning_set_max_entries(struct xp_mac_learning *ml,
@@ -209,6 +211,8 @@ void ops_xp_mac_learning_on_vni_removed(struct xp_mac_learning *ml,
 void ops_xp_mac_learning_dump_table(struct xp_mac_learning *ml,
                                     struct ds *d_str);
 bool ops_xp_ml_addr_is_multicast(const macAddr_t mac, bool normal_order);
+
+void ops_xp_mac_learning_on_idle_timer_expired(struct xp_mac_learning *ml);
 
 void ops_xp_mac_learning_on_mlearn_timer_expired(struct xp_mac_learning *ml);
 

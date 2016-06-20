@@ -45,16 +45,20 @@ typedef enum xp_host_if_trap_channel {
     XP_HOST_IF_TRAP_CHANNEL_CUSTOM_RANGE_BASE = 0x10000000
 } xp_host_if_trap_channel_t;
 
+/* TODO: Remove this declaration when this API is added to openXpsPort. */
+XP_STATUS xpsPortGetPortControlIntfId(xpsDevice_t devId, xpsPort_t portNum,
+                                      xpsInterfaceId_t *intfId);
+
 static int netdev_init(struct xpliant_dev *xp_dev);
 static int netdev_if_create(struct xpliant_dev *xp_dev, char *intf_name,
                             xpsInterfaceId_t xps_if_id,
-                            struct ether_addr *mac, int *knet_if_id);
-static int netdev_if_delete(struct xpliant_dev *xp_dev, int knet_if_id);
+                            struct ether_addr *mac, int *xpnet_if_id);
+static int netdev_if_delete(struct xpliant_dev *xp_dev, int xpnet_if_id);
 static int netdev_if_filter_delete(struct xpliant_dev *xp_dev,
-                                   int knet_filter_id);
+                                   int xpnet_filter_id);
 static int netdev_if_filter_create(char *filter_name, struct xpliant_dev *xp_dev,
                                    xpsInterfaceId_t xps_if_id,
-                                   int knet_if_id, int *knet_filter_id);
+                                   int xpnet_if_id, int *xpnet_filter_id);
 
 const struct xp_host_if_api xp_host_netdev_api = {
     netdev_init,
@@ -92,17 +96,17 @@ netdev_init(struct xpliant_dev *xp_dev)
 static int
 netdev_if_create(struct xpliant_dev *xp_dev, char *intf_name,
                  xpsInterfaceId_t xps_if_id,
-                 struct ether_addr *mac, int *knet_if_id)
+                 struct ether_addr *mac, int *xpnet_if_id)
 {
-    int knetId = 0;
+    int xpnetId = 0;
 
-    if (XP_NO_ERR != xpsNetdevKnetIdAllocate(xp_dev->id, &knetId)) {
-        VLOG_ERR("%s, Unable to allocate knetId for interface: %u, %s",
+    if (XP_NO_ERR != xpsNetdevXpnetIdAllocate(xp_dev->id, &xpnetId)) {
+        VLOG_ERR("%s, Unable to allocate xpnetId for interface: %u, %s",
                   __FUNCTION__, xps_if_id, intf_name);
         return EPERM;
     }
 
-    if (XP_NO_ERR != xpsNetdevIfCreate(xp_dev->id, knetId, intf_name)) {
+    if (XP_NO_ERR != xpsNetdevIfCreate(xp_dev->id, xpnetId, intf_name)) {
         VLOG_ERR("%s, Unable to create interface: %u, %s",
                  __FUNCTION__ ,xps_if_id, intf_name);
         return EPERM;
@@ -111,21 +115,21 @@ netdev_if_create(struct xpliant_dev *xp_dev, char *intf_name,
     if (ops_xp_net_if_setup(intf_name, mac)) {
         VLOG_ERR("%s, Unable to setup %s interface.",
                  __FUNCTION__, intf_name);
-        xpsNetdevIfDelete(xp_dev->id, knetId);
-        xpsNetdevKnetIdFree(xp_dev->id, knetId);
+        xpsNetdevIfDelete(xp_dev->id, xpnetId);
+        xpsNetdevXpnetIdFree(xp_dev->id, xpnetId);
         return EFAULT;
     }
 
-    *knet_if_id = knetId;
+    *xpnet_if_id = xpnetId;
     return 0;
 }
 
 static int
-netdev_if_delete(struct xpliant_dev *xp_dev, int knet_if_id)
+netdev_if_delete(struct xpliant_dev *xp_dev, int xpnet_if_id)
 {
-    if (XP_NO_ERR != xpsNetdevIfDelete(xp_dev->id, knet_if_id)) {
-        VLOG_ERR("%s, Unable to delete knet_if_id: %u",
-                 __FUNCTION__, knet_if_id);
+    if (XP_NO_ERR != xpsNetdevIfDelete(xp_dev->id, xpnet_if_id)) {
+        VLOG_ERR("%s, Unable to delete xpnet_if_id: %u",
+                 __FUNCTION__, xpnet_if_id);
         return EPERM;
     }
 
@@ -135,34 +139,44 @@ netdev_if_delete(struct xpliant_dev *xp_dev, int knet_if_id)
 static int
 netdev_if_filter_create(char *filter_name, struct xpliant_dev *xp_dev,
                         xpsInterfaceId_t xps_if_id,
-                        int knet_if_id, int *knet_filter_id)
+                        int xpnet_if_id, int *xpnet_filter_id)
 {
-    if (XP_NO_ERR != xpsNetdevIfTxHeaderSet(xp_dev->id, knet_if_id, xps_if_id,
+    xpsInterfaceId_t send_if_id;
+    XP_STATUS status = XP_NO_ERR;
+
+    status = xpsPortGetPortControlIntfId(xp_dev->id, xps_if_id, &send_if_id);
+    if (status) {
+        VLOG_ERR("%s, Unable to get control interface ID for port: %u. ERR%u",
+                 __FUNCTION__, xps_if_id, status);
+        return EPERM;
+    }
+
+    if (XP_NO_ERR != xpsNetdevIfTxHeaderSet(xp_dev->id, xpnet_if_id, send_if_id,
                                             true)) {
         VLOG_ERR("%s, Unable to set tx header for interface: %u",
                  __FUNCTION__, xps_if_id);
         return EPERM;
     }
 
-    if (XP_NO_ERR != xpsNetdevIfLinkSet(xp_dev->id, knet_if_id, xps_if_id,
+    if (XP_NO_ERR != xpsNetdevIfLinkSet(xp_dev->id, xpnet_if_id, xps_if_id,
                                         true)) {
-        xpsNetdevIfTxHeaderSet(xp_dev->id, knet_if_id, xps_if_id, false);
+        xpsNetdevIfTxHeaderSet(xp_dev->id, xpnet_if_id, xps_if_id, false);
         VLOG_ERR("%s, Unable to link %u(%u) interface.",
-                 __FUNCTION__, xps_if_id, knet_if_id);
+                 __FUNCTION__, xps_if_id, xpnet_if_id);
         return EFAULT;
     }
 
-    *knet_filter_id = knet_if_id;
+    *xpnet_filter_id = xpnet_if_id;
     return 0;
 }
 
 static int
-netdev_if_filter_delete(struct xpliant_dev *xp_dev, int knet_filter_id)
+netdev_if_filter_delete(struct xpliant_dev *xp_dev, int xpnet_filter_id)
 {
-    uint32_t knet_if_id = knet_filter_id;
+    uint32_t xpnet_if_id = xpnet_filter_id;
 
-    xpsNetdevIfTxHeaderSet(xp_dev->id, knet_if_id, 0, false);
-    xpsNetdevIfLinkSet(xp_dev->id, knet_if_id, 0, false);
+    xpsNetdevIfTxHeaderSet(xp_dev->id, xpnet_if_id, 0, false);
+    xpsNetdevIfLinkSet(xp_dev->id, xpnet_if_id, 0, false);
 
     return 0;
 }

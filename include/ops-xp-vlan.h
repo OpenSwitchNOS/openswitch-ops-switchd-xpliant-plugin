@@ -32,7 +32,7 @@ struct ofproto_xpliant;
 #define XP_VLAN_MIN_ID              XPS_VLANID_MIN
 #define XP_VLAN_MAX_ID              XPS_VLANID_MAX
 #define XP_VLAN_MAX_COUNT           XP_MAX_VLAN_NUM
-#define XP_DEFAULT_VLAN_ID          100/*XP_VLAN_MIN_ID*/
+#define XP_DEFAULT_VLAN_ID          1/*XP_VLAN_MIN_ID*/
 
 /* In XDK tunnel VNIs are configured per VLAN whereas in OVS - per tunnel.
  * So created once VNI can serve for many tunnels. This entry is designed 

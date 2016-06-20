@@ -52,11 +52,13 @@ VLOG_DEFINE_THIS_MODULE(xp_mac_learning);
 /* MAC learning timer timeout in seconds. */
 #define XP_ML_MLEARN_TIMER_TIMEOUT 30
 
+/* MAC idle timer tick in seconds. */
+#define XP_ML_MLEARN_IDLE_TICK_TIME 1
+
 /*struct xp_mac_learning* g_xp_ml = NULL;*/
 static struct vlog_rate_limit ml_rl = VLOG_RATE_LIMIT_INIT(5, 20);
 
 static void *mac_learning_events_handler(void *arg);
-static void unixctl_init(void);
 static void ops_xp_mac_learning_mlearn_action_add(struct xp_mac_learning *ml,
                                                   xpsFdbEntry_t *xps_fdb_entry,
                                                   uint32_t index,
@@ -84,6 +86,27 @@ normalize_idle_time(unsigned int idle_time)
             : idle_time);
 }
 
+static void
+calc_aging_params(unsigned int idle_time, uint32_t *unit_time,
+                  uint32_t *age_expo)
+{
+    uint32_t i;
+
+    for (*age_expo = 1, i = 2; ((idle_time * 10000000ULL * 55) % (i * 2)) == 0;
+            i *= 2, (*age_expo)++);
+
+    /* Skip odd age expo values */
+    if ((*age_expo) % 2 != 0) {
+        (*age_expo)--;
+        i /= 2;
+    }
+
+    *unit_time = (idle_time * 10000000ULL * 55) / i;
+
+    VLOG_INFO("%s: idle_time: %u -> unit_time: %u, age_expo: %u",
+              __FUNCTION__, idle_time, *unit_time, *age_expo);
+}
+
 /* Creates and returns a new MAC learning table with an initial MAC aging
  * timeout of 'idle_time' seconds and an initial maximum of XP_MAC_DEFAULT_MAX
  * entries. */
@@ -93,6 +116,7 @@ ops_xp_mac_learning_create(struct xpliant_dev *xpdev, unsigned int idle_time)
     struct xp_mac_learning *ml = NULL;
     XP_STATUS status = XP_NO_ERR;
     int idx = 0;
+    uint32_t unit_time, age_expo;
     struct plugin_extension_interface *extension = NULL;
 
     ovs_assert(xpdev);
@@ -144,6 +168,19 @@ ops_xp_mac_learning_create(struct xpliant_dev *xpdev, unsigned int idle_time)
                      "of fdb learning handler registration");
     }
 
+    /* Calculate aging configuration values */
+    calc_aging_params(ml->idle_time, &unit_time, &age_expo);
+
+    /* Configure aging related entities */
+    status = xpsSetAgingMode(ml->xpdev->id, XP_AGE_MODE_AUTO);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to configure aging mode to AUTO. Status: %d", status);
+    }
+    status = xpsSetAgingCycleUnitTime(ml->xpdev->id, unit_time);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to set aging cycle unit time. Status: %d", status);
+    }
+
     status = xpsFdbRegisterAgingHandler(ml->xpdev->id,
                                         ops_xp_mac_learning_on_aging, ml);
     if (status != XP_NO_ERR) {
@@ -152,6 +189,19 @@ ops_xp_mac_learning_create(struct xpliant_dev *xpdev, unsigned int idle_time)
         ovs_abort(0, "xp_mac_learning_create failed due to inability"
                      "of fdb aging handler registration");
     }
+
+    /* Enable aging for FDB table */
+    status = xpsFdbConfigureTableAging(ml->xpdev->id, true);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to enable FDB aging. Status: %d", status);
+    }
+    /* Configure FDG aging expo */
+    status = xpsFdbSetAgingTime(ml->xpdev->id, age_expo);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to set FDB aging time. Status: %d", status);
+    }
+
+    timer_set_duration(&ml->idle_timer, XP_ML_MLEARN_IDLE_TICK_TIME * 1000);
 
     return ml;
 }
@@ -204,12 +254,32 @@ ops_xp_mac_learning_unref(struct xp_mac_learning *ml)
 }
 
 /* Changes the MAC aging timeout of 'ml' to 'idle_time' seconds. */
-void
+int
 ops_xp_mac_learning_set_idle_time(struct xp_mac_learning *ml,
                                   unsigned int idle_time)
 {
+    uint32_t age_expo, unit_time;
+    XP_STATUS status = XP_NO_ERR;
+
     idle_time = normalize_idle_time(idle_time);
+
+    calc_aging_params(idle_time, &unit_time, &age_expo);
+
+    status = xpsSetAgingCycleUnitTime(ml->xpdev->id, unit_time);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to set aging cycle unit time. Status: %d", status);
+        return EPERM;
+    }
+
+    status = xpsFdbSetAgingTime(ml->xpdev->id, age_expo);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to set FDB aging expo. Status: %d", status);
+        return EPERM;
+    }
+
     ml->idle_time = idle_time;
+
+    return 0;
 }
 
 /* Sets the maximum number of entries in 'ml' to 'max_entries', adjusting it
@@ -322,12 +392,12 @@ ops_xp_mac_learning_insert(struct xp_mac_learning *ml, struct xp_mac_entry *e)
     }
 
     hmap_insert(&ml->table, &e->hmap_node, index);
-    VLOG_INFO_RL(&ml_rl, "Inserted new entry into ML table: VLAN %d, "
-                         "MAC: " XP_ETH_ADDR_FMT ", Intf ID: %u, index 0x%lx\n",
-                 e->xps_fdb_entry.vlanId, 
-                 XP_ETH_ADDR_ARGS(e->xps_fdb_entry.macAddr),
-                 e->xps_fdb_entry.intfId,
-                 e->hmap_node.hash);
+    VLOG_DBG_RL(&ml_rl, "Inserted new entry into ML table: VLAN %d, "
+                        "MAC: " XP_ETH_ADDR_FMT ", Intf ID: %u, index 0x%lx\n",
+                e->xps_fdb_entry.vlanId,
+                XP_ETH_ADDR_ARGS(e->xps_fdb_entry.macAddr),
+                e->xps_fdb_entry.intfId,
+                e->hmap_node.hash);
 
     ops_xp_mac_learning_mlearn_action_add(ml, &e->xps_fdb_entry,
                                           index, reHashIndex, MLEARN_ADD);
@@ -359,7 +429,7 @@ ops_xp_mac_learning_lookup_by_vlan_and_mac(const struct xp_mac_learning *ml,
     ovs_assert(ml);
 
     HMAP_FOR_EACH (e, hmap_node, &ml->table) {
-        if (memcmp(e->xps_fdb_entry.macAddr, macAddr, ETH_ADDR_LEN) &&
+        if (!memcmp(e->xps_fdb_entry.macAddr, macAddr, ETH_ADDR_LEN) &&
             (e->xps_fdb_entry.vlanId == vlan_id)) {
 
             return e;
@@ -387,6 +457,13 @@ ops_xp_mac_learning_expire(struct xp_mac_learning *ml, struct xp_mac_entry *e)
     }
 
     hmap_remove(&ml->table, &e->hmap_node);
+
+    VLOG_DBG_RL(&ml_rl, "Expire entry in ML table: VLAN %d, "
+                        "MAC: " XP_ETH_ADDR_FMT ", Intf ID: %u, index 0x%lx\n",
+                e->xps_fdb_entry.vlanId,
+                XP_ETH_ADDR_ARGS(e->xps_fdb_entry.macAddr),
+                e->xps_fdb_entry.intfId,
+                e->hmap_node.hash);
 
     ops_xp_mac_learning_mlearn_action_add(ml, &e->xps_fdb_entry,
                                           e->hmap_node.hash,
@@ -920,6 +997,26 @@ ops_xp_mac_learning_dump_table(struct xp_mac_learning *ml, struct ds *d_str)
         }
     }
 }
+
+/* Mlearn timer expiration handler. */
+void
+ops_xp_mac_learning_on_idle_timer_expired(struct xp_mac_learning *ml)
+{
+    if (ml) {
+        size_t count = ml->max_entries > 10 ? ml->max_entries : 10;
+        XP_STATUS status = XP_NO_ERR;
+
+        do {
+            XP_LOCK();
+            /* Flush aging events */
+            status = xpsAgeFifoHandler(ml->xpdev->id);
+            XP_UNLOCK();
+        } while ((status == XP_NO_ERR) && (count--));
+
+        timer_set_duration(&ml->idle_timer, XP_ML_MLEARN_IDLE_TICK_TIME * 1000);
+    }
+}
+
 
 /* Checks if the hmap has reached it's capacity or not. */
 static bool

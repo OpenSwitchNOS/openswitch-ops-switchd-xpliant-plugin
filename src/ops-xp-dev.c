@@ -43,6 +43,7 @@
 #include "openXpsPacketDrv.h"
 #include "openXpsMac.h"
 #include "openXpsPort.h"
+#include "openXpsVlan.h"
 #include "ofproto/ofproto.h"
 #include "ovs-rcu.h"
 #include "dummy.h"
@@ -93,9 +94,7 @@ static const struct eth_addr eth_addr_lldp OVS_UNUSED
 
 static void *xp_dev_recv_handler(void *arg);
 static pthread_t xp_dev_event_handler_create(struct xpliant_dev *dev);
-#if (XP_DEV_EVENT_MODE == XP_DEV_EVENT_MODE_POLL)
 static void *xp_dev_event_handler(void *arg);
-#endif /* XP_DEV_EVENT_MODE */
 static void pkt_available_handle(xpsDevice_t intrSrcDev);
 static void cleanup_cb(void* aux);
 
@@ -183,7 +182,30 @@ ops_xp_dev_system_defaults_set(const struct xpliant_dev *dev)
 {
     macAddr_t key_mac;
     int error;
+    int i;
     XP_STATUS status;
+
+    /* Turn all the ports off by default. */
+    for (i = 0; i < XP_MAX_TOTAL_PORTS; i++) {
+        status = xpsMacPortEnable(dev->id, i, false);
+        if (status != XP_NO_ERR) {
+            VLOG_ERR("%s: Error while disabling port: %d. "
+                     "Error code: %d\n", __FUNCTION__, i, status);
+        }
+    }
+
+    error = ops_xp_vlan_create(dev->vlan_mgr, XP_DEFAULT_VLAN_ID);
+    if (error) {
+        VLOG_ERR("Unable to create default VLAN");
+    }
+
+    ops_xp_vlan_set_created_by_user(dev->vlan_mgr, XP_DEFAULT_VLAN_ID, true);
+
+    status = xpsVlanSetDefault(dev->id, XP_DEFAULT_VLAN_ID);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("%s: Error in setting default VLAN. "
+                 "Error code: %d\n", __FUNCTION__, status);
+    }
 
     /* Update pVid on CPU port so we can send VLAN untagged packets
      * from CPU (OFPP_LOCAL of OFPP_CONTROLLER) to start of pipeline */
@@ -554,23 +576,9 @@ ipc_handler(void *arg)
 static pthread_t
 xp_dev_event_handler_create(struct xpliant_dev *dev)
 {
-#if (XP_DEV_EVENT_MODE == XP_DEV_EVENT_MODE_INTERRUPT)
-    xpEventSignalHandler signalHndlr = xpsSalGetEventSignalHandler();
-    sigset_t mask;
-
-    /* Block XP_RT_SIGNAL singal for main thread */
-    sigemptyset(&mask);
-    sigaddset(&mask, XP_RT_SIGNAL);
-    xpthread_sigmask(SIG_BLOCK, &mask, NULL);
-
-    /* Create separate thread to listen XP_RT_SIGNAL signal continuously */
-	return ovs_thread_create("ops-xp-dev-event", signalHndlr, NULL);
-#else /* (XP_DEV_EVENT_MODE == XP_DEV_EVENT_MODE_POLL) */
     return ovs_thread_create("ops-xp-dev-event", xp_dev_event_handler, (void *)dev);
-#endif /* XP_DEV_EVENT_MODE */
 }
 
-#if (XP_DEV_EVENT_MODE == XP_DEV_EVENT_MODE_POLL)
 /* This handler thread handles XP device mics events like port link
  * status change, fault detection, etc.
  * 
@@ -580,7 +588,6 @@ xp_dev_event_handler(void *arg)
 {
     return ops_xp_port_event_handler(arg);
 }
-#endif /* XP_DEV_EVENT_MODE */
 
 static void
 locker_init(void)
@@ -596,8 +603,8 @@ host_if_type_init(void)
     const char *p_mode = getenv("HOST_PACKET_IF_MODE");
 
     if (p_mode != NULL) {
-        if (strcmp("KNET_NETDEV", p_mode) == 0) {
-            host_if_type = XP_HOST_IF_KNET;
+        if (strcmp("XPNET_NETDEV", p_mode) == 0) {
+            host_if_type = XP_HOST_IF_XPNET;
             packet_if_type = XP_NETDEV_DMA;
         } else if (strcmp("TAP_NETDEV", p_mode) == 0) {
             host_if_type = XP_HOST_IF_TAP;
@@ -723,6 +730,8 @@ ops_xp_dev_add_intf_entry(struct xpliant_dev *xpdev, xpsInterfaceId_t intf_id,
         hmap_insert(&xpdev->if_id_to_name_map, &e->hmap_node, intf_id);
         ovs_rwlock_unlock(&xpdev->if_id_to_name_lock);
     }
+
+    return 0;
 }
 
 /* Removes interface ID to name mapping. */

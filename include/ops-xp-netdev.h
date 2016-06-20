@@ -85,8 +85,8 @@ struct netdev_xpliant {
     bool intf_initialized;
     uint8_t hwaddr[ETH_ADDR_LEN] OVS_GUARDED;
     long long int link_resets OVS_GUARDED;
-    int knet_if_id;
-    int knet_port_filter_id;
+    int xpnet_if_id;
+    int xpnet_port_filter_id;
 
     /* Port info structure. */
     struct xp_port_info *port_info;

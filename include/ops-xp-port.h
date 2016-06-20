@@ -47,6 +47,7 @@ struct xp_port_info {
     xpsDevice_t id;                 /* Xpliant device ID. */
     xpsPort_t port_num;             /* Device port number */
     bool hw_enable;
+    bool serdes_tuned;
 
     /* ------- Subport/lane split config (e.g. QSFP+) -------
      * Subport count & lane split status. These are valid for
@@ -67,8 +68,6 @@ int ops_xp_port_get_enable(struct netdev_xpliant *netdev, bool *enable);
 
 int ops_xp_port_set_enable(struct netdev_xpliant *netdev, bool enable);
 
-#if (XP_DEV_EVENT_MODE == XP_DEV_EVENT_MODE_POLL)
 void *ops_xp_port_event_handler(void *arg);
-#endif /* XP_DEV_EVENT_MODE */
 
 #endif /* ops-xp-port.h */

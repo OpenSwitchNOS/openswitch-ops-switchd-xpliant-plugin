@@ -33,7 +33,7 @@
 struct xpliant_dev;
 
 typedef enum {
-    XP_HOST_IF_KNET,
+    XP_HOST_IF_XPNET,
     XP_HOST_IF_TAP,
     XP_HOST_IF_DEFAULT = XP_HOST_IF_TAP
 } xp_host_if_type_t;
@@ -43,13 +43,13 @@ struct xp_host_if_api {
     void (*deinit)(struct xpliant_dev *xp_dev);
     int (*if_create)(struct xpliant_dev *xp_dev, char *name,
                      xpsInterfaceId_t xps_if_id,
-                     struct ether_addr *mac, int *knet_if_id);
-    int (*if_delete)(struct xpliant_dev *xp_dev, int knet_if_id);
+                     struct ether_addr *mac, int *xpnet_if_id);
+    int (*if_delete)(struct xpliant_dev *xp_dev, int xpnet_if_id);
     int (*if_filter_create)(char *name, struct xpliant_dev *xp_dev,
                             xpsInterfaceId_t xps_if_id,
-                            int knet_if_id, int *knet_filter_id);
+                            int xpnet_if_id, int *xpnet_filter_id);
     int (*if_filter_delete)(struct xpliant_dev *xp_dev,
-                            int knet_filter_id);
+                            int xpnet_filter_id);
 };
 
 struct xp_host_if_info {
@@ -61,12 +61,12 @@ int ops_xp_host_init(struct xpliant_dev *xp_dev, xp_host_if_type_t type);
 void ops_xp_host_deinit(struct xpliant_dev *xp_dev);
 int ops_xp_host_if_create(struct xpliant_dev *xp_dev, char *name,
                           xpsInterfaceId_t xps_if_id,
-                          struct ether_addr *mac, int *knet_if_id);
-int ops_xp_host_if_delete(struct xpliant_dev *xp_dev, int knet_if_id);
+                          struct ether_addr *mac, int *xpnet_if_id);
+int ops_xp_host_if_delete(struct xpliant_dev *xp_dev, int xpnet_if_id);
 void ops_xp_host_port_filter_create(char *name, struct xpliant_dev *xp_dev,
                                     xpsInterfaceId_t xps_if_id,
-                                    int knet_if_id, int *knet_filter_id);
+                                    int xpnet_if_id, int *xpnet_filter_id);
 void ops_xp_host_filter_delete(char *name, struct xpliant_dev *xp_dev,
-                               int knet_filter_id);
+                               int xpnet_filter_id);
 
 #endif /* ops-xp-host.h */
