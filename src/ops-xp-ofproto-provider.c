@@ -135,7 +135,6 @@ static struct ofport_xpliant *dp_port_to_ofport(
         const struct ofproto_xpliant *ofproto, odp_port_t odp_port);
 static ofp_port_t odp_port_to_ofp_port(const struct ofproto_xpliant *ofproto,
                                        odp_port_t odp_port);
-static void ofproto_system_defaults_set(struct ofproto_xpliant *ofproto);
 
 static inline struct ofport_xpliant *
 ofport_xpliant_cast(const struct ofport *ofport)
@@ -1109,6 +1108,9 @@ bundle_del_port(struct ofport_xpliant *port)
                          netdev->ifId, XP_DEFAULT_VLAN_ID, rc);
             }
         }
+
+        ops_xp_port_default_vlan_set(netdev->xpdev->id, netdev->port_num,
+                                     XP_DEFAULT_VLAN_ID);
     }
 }
 
@@ -1148,8 +1150,7 @@ bundle_add_port(struct bundle_xpliant *bundle, ofp_port_t ofp_port)
 int
 bundle_update_vlan_config(struct ofproto_xpliant *ofproto,
                           struct bundle_xpliant *bundle,
-                          const struct ofproto_bundle_settings *s,
-                          bool *need_flush)
+                          const struct ofproto_bundle_settings *s)
 {
     struct ofport_xpliant *port = NULL;
     xpsVlan_t vlan = 0;
@@ -1162,7 +1163,6 @@ bundle_update_vlan_config(struct ofproto_xpliant *ofproto,
     ovs_assert(ofproto);
     ovs_assert(bundle);
     ovs_assert(s);
-    ovs_assert(need_flush);
 
     old_vlan = (bundle->vlan != -1) ? bundle->vlan : XP_DEFAULT_VLAN_ID;
     old_vlan_mode = bundle->vlan_mode;
@@ -1189,7 +1189,6 @@ bundle_update_vlan_config(struct ofproto_xpliant *ofproto,
 
         bundle->vlan_mode = s->vlan_mode;
         bundle->use_priority_tags = s->use_priority_tags;
-        *need_flush = true;
     }
 
     /* Set VLAN tag. */
@@ -1199,7 +1198,6 @@ bundle_update_vlan_config(struct ofproto_xpliant *ofproto,
 
     if (vlan != bundle->vlan) {
         bundle->vlan = vlan;
-        *need_flush = true;
     }
 
     VLOG_INFO("%s(%d) bundle->vlan %d, "
@@ -1281,8 +1279,8 @@ bundle_update_vlan_config(struct ofproto_xpliant *ofproto,
         }
     }
 
-    if (!ops_xp_vlan_bitmap_equal(trunks, bundle->trunks) || *need_flush
-        || (bundle->is_lag && bundle->ports_updated)) {
+    if (!ops_xp_vlan_bitmap_equal(trunks, bundle->trunks) ||
+        (bundle->is_lag && bundle->ports_updated)) {
 
         unsigned long *trunks_diff = NULL;
         int vid = 0;
@@ -1333,7 +1331,7 @@ bundle_update_vlan_config(struct ofproto_xpliant *ofproto,
                 if (ops_xp_vlan_is_existing(ofproto->vlan_mgr, vid)) {
                     if (bitmap_is_set(bundle->trunks, vid)) {
 
-                        xpsL2EncapType_e encapType  = ((bundle->vlan != vid) ||
+                        xpsL2EncapType_e encapType = ((bundle->vlan != vid) ||
                             (bundle->vlan_mode == PORT_VLAN_NATIVE_TAGGED))
                                                   ? XP_L2_ENCAP_DOT1Q_TAGGED
                                                   : XP_L2_ENCAP_DOT1Q_UNTAGGED;
@@ -1345,16 +1343,42 @@ bundle_update_vlan_config(struct ofproto_xpliant *ofproto,
                                   bundle->intfId, bundle->vlan, *bundle->trunks,
                                   vid, encapType);
 
-                        retVal = ops_xp_vlan_member_add(ofproto->vlan_mgr, vid,
-                                                        bundle->intfId,
-                                                        encapType, 0);
+                        if ((vid == XP_DEFAULT_VLAN_ID) &&
+                            ops_xp_vlan_port_is_member(ofproto->vlan_mgr,
+                                                       (xpsVlan_t)vid,
+                                                        bundle->intfId)) {
+
+                            retVal = ops_xp_vlan_member_set_tagging(
+                                              ofproto->vlan_mgr,
+                                              XP_DEFAULT_VLAN_ID,
+                                              bundle->intfId,
+                                              encapType == XP_L2_ENCAP_DOT1Q_TAGGED,
+                                              0);
+                        } else {
+                            retVal = ops_xp_vlan_member_add(ofproto->vlan_mgr, vid,
+                                                            bundle->intfId,
+                                                            encapType, 0);
+                        }
                         if (retVal) {
                             return retVal;
                         }
                     } else {
-                        retVal = ops_xp_vlan_member_remove(ofproto->vlan_mgr,
-                                                           vid,
-                                                           bundle->intfId);
+                        if ((vid == XP_DEFAULT_VLAN_ID)) {
+                            if (ops_xp_vlan_port_is_tagged_member(ofproto->vlan_mgr,
+                                                                  (xpsVlan_t)vid,
+                                                                  bundle->intfId)) {
+
+                                retVal = ops_xp_vlan_member_set_tagging(
+                                                  ofproto->vlan_mgr,
+                                                  XP_DEFAULT_VLAN_ID,
+                                                  bundle->intfId,
+                                                  false, 0);
+                            }
+                        } else {
+                            retVal = ops_xp_vlan_member_remove(ofproto->vlan_mgr,
+                                                               vid,
+                                                               bundle->intfId);
+                        }
 
                         if (retVal) {
                             return retVal;
@@ -1365,9 +1389,7 @@ bundle_update_vlan_config(struct ofproto_xpliant *ofproto,
 
             bitmap_free(trunks_diff);
         } /* if (trunks_diff) */
-
-        *need_flush = true;
-    } /* if (!vlan_bitmap_equal(trunks, bundle->trunks) || need_flush) */
+    } /* if (!vlan_bitmap_equal(trunks, bundle->trunks) || ...) */
 
     if (trunks != s->trunks) {
         bitmap_free(trunks);
@@ -2089,13 +2111,7 @@ ofproto_xpliant_bundle_set(struct ofproto *ofproto_, void *aux,
         }
         /* Handle Port/LAG VLAN configuration */
         if (bundle->intfId != XPS_INTF_INVALID_ID) {
-            bundle_update_vlan_config(ofproto, bundle, s, &need_flush);
-
-            /* If we changed something that would affect MAC learning, un-learn
-             * everything on this port and force flow revalidation. */
-            if (need_flush) {
-                bundle_flush_macs(bundle);
-            }
+            bundle_update_vlan_config(ofproto, bundle, s);
 
             ops_xp_dev_add_intf_entry(ofproto->xpdev, bundle->intfId,
                                       bundle->name, 0);
@@ -2219,16 +2235,20 @@ ofproto_xpliant_set_vlan(struct ofproto *ofproto_, int vid, bool add)
                 }
             }
         }
-
-        ops_xp_vlan_set_created_by_user(ofproto->vlan_mgr,(xpsVlan_t)vid, false);
-        /* Remove VLAN only if no l3 interfaces are still using it */
-        if (ops_xp_vlan_is_membership_empty(ofproto->vlan_mgr, (xpsVlan_t)vid)
-            && (vid != XP_DEFAULT_VLAN_ID)) {
-            error = ops_xp_vlan_remove(ofproto->vlan_mgr, (xpsVlan_t)vid);
-            if (error) {
-                return error;
+        /* Do not remove default VLAN */
+        if (vid != XP_DEFAULT_VLAN_ID) {
+            ops_xp_vlan_set_created_by_user(ofproto->vlan_mgr,(xpsVlan_t)vid, false);
+            /* Remove VLAN only if no l3 interfaces are still using it */
+            if (ops_xp_vlan_is_membership_empty(ofproto->vlan_mgr,
+                                                (xpsVlan_t)vid)) {
+                error = ops_xp_vlan_remove(ofproto->vlan_mgr, (xpsVlan_t)vid);
+                if (error) {
+                    return error;
+                }
             }
         }
+        ops_xp_mac_learning_on_vlan_removed(ofproto->vlan_mgr->xp_dev->ml, 
+                                           (xpsVlan_t)vid);
     }
 
     return 0;

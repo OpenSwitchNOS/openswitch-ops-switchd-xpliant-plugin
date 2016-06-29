@@ -64,14 +64,14 @@ struct xp_vlan {
 /* Vlan manager - holds table of the VLANs*/
 struct xp_vlan_mgr {
     struct xp_vlan table[XP_VLAN_MAX_COUNT];
-    struct ofproto_xpliant* ofproto;
+    struct xpliant_dev *xp_dev;
     xpsDevice_t dev_id;
     struct ovs_refcount ref_cnt;
     struct ovs_rwlock rwlock;
 };
 
 /* Basics. */
-struct xp_vlan_mgr *ops_xp_vlan_mgr_create(xpsDevice_t devId);
+struct xp_vlan_mgr *ops_xp_vlan_mgr_create(struct xpliant_dev *xp_dev);
 struct xp_vlan_mgr *ops_xp_vlan_mgr_ref(struct xp_vlan_mgr *mgr);
 void ops_xp_vlan_mgr_unref(struct xp_vlan_mgr* mgr);
 

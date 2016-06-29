@@ -301,7 +301,7 @@ ops_xp_dev_init(struct xpliant_dev *dev)
     /* Initialize host interface. */
     ops_xp_host_init(dev, ops_xp_host_if_type_get());
 
-    dev->vlan_mgr = ops_xp_vlan_mgr_create(dev->id);
+    dev->vlan_mgr = ops_xp_vlan_mgr_create(dev);
     if (!dev->vlan_mgr) {
         VLOG_ERR("Unable to create VLAN manager");
         goto error;

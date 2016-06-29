@@ -23,6 +23,7 @@
 #include <errno.h>
 
 #include "ops-xp-vlan.h"
+#include "ops-xp-mac-learning.h"
 #include "bitmap.h"
 #include <openvswitch/vlog.h>
 #include "ops-xp-ofproto-provider.h"
@@ -40,14 +41,16 @@ vlan_member_lookup(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id,
  * and hash table are created here for each VLAN and are destroyed 
  * only during VLAN manager removal. */ 
 struct xp_vlan_mgr *
-ops_xp_vlan_mgr_create(xpsDevice_t devId)
+ops_xp_vlan_mgr_create(struct xpliant_dev *xp_dev)
 {
     struct xp_vlan_mgr *mgr = NULL;
     int i = 0;
 
+    ovs_assert(xp_dev);
+
     mgr = xmalloc(sizeof *mgr);
 
-    mgr->dev_id = devId;
+    mgr->xp_dev = xp_dev;
 
     for (i = XP_VLAN_MIN_ID; i <= XP_VLAN_MAX_ID; i++) {
         mgr->table[i].is_existing = false;
@@ -89,6 +92,7 @@ ops_xp_vlan_mgr_unref(struct xp_vlan_mgr *mgr)
         }
 
         ovs_rwlock_destroy(&mgr->rwlock);
+        ops_xp_dev_free(mgr->xp_dev);
 
         free(mgr);
     }
@@ -115,31 +119,31 @@ ops_xp_vlan_create(struct xp_vlan_mgr* mgr, xpsVlan_t vlan_id)
         return EEXIST;
     }
 
-    status = xpsVlanCreate(mgr->dev_id, vlan_id);
+    status = xpsVlanCreate(mgr->xp_dev->id, vlan_id);
     if (status != XP_NO_ERR) {
         VLOG_ERR("%s: Could not create vlan: %d. Error code: %d\n",
                  __FUNCTION__, vlan_id, status);
         return EPERM;
     }
 
-    status = xpsVlanGetConfig(mgr->dev_id, vlan_id, &vlanConfig);
+    status = xpsVlanGetConfig(mgr->xp_dev->id, vlan_id, &vlanConfig);
     if (status != XP_NO_ERR) {
         VLOG_ERR("Failed to get VLAN config for devId %d and vlanId %d \n",
-                 mgr->dev_id, vlan_id);
+                 mgr->xp_dev->id, vlan_id);
         return EPERM;
     }
 
-    xpsStpGetDefault(mgr->dev_id, &vlanConfig.stpId);
+    xpsStpGetDefault(mgr->xp_dev->id, &vlanConfig.stpId);
     vlanConfig.mirrorAnalyzerId = 0;
     vlanConfig.saMissCmd = XP_PKTCMD_FWD_MIRROR;
     vlanConfig.bcCmd = XP_PKTCMD_FWD;
     vlanConfig.unknownUcCmd = XP_PKTCMD_FWD;
     vlanConfig.arpBcCmd = XP_PKTCMD_FWD;
 
-    status = xpsVlanSetConfig(mgr->dev_id, vlan_id, &vlanConfig);
+    status = xpsVlanSetConfig(mgr->xp_dev->id, vlan_id, &vlanConfig);
     if (status != XP_NO_ERR) {
         VLOG_ERR("Failed to set VLAN config for devId %d and vlanId %d \n",
-                 mgr->dev_id, vlan_id);
+                 mgr->xp_dev->id, vlan_id);
         return EPERM;
     }
 
@@ -203,7 +207,7 @@ ops_xp_vlan_remove(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id)
     hmap_shrink(&mgr->table[vlan_id].nvgre_vnis);
 
     /* Remove from hardware. */
-    status = xpsVlanDestroy(mgr->dev_id, vlan_id);
+    status = xpsVlanDestroy(mgr->xp_dev->id, vlan_id);
     if (status != XP_NO_ERR) {
         VLOG_ERR("%s: Could not destroy vlan %d. Error code: %d\n",
                  __FUNCTION__, vlan_id, status);
@@ -233,7 +237,7 @@ ops_xp_vlan_enable_flooding(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id,
          return ENXIO;
     }
 
-    status = xpsVlanGetUnknownSaCmd(mgr->dev_id, vlan_id, &current_sa_miss_Cmd);
+    status = xpsVlanGetUnknownSaCmd(mgr->xp_dev->id, vlan_id, &current_sa_miss_Cmd);
     if (status != XP_NO_ERR) {
         VLOG_ERR("%s: Could not get SA learning for the vlan %u, error code: %d",
                  __FUNCTION__, vlan_id, status);
@@ -244,7 +248,7 @@ ops_xp_vlan_enable_flooding(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id,
         return 0;
     }
 
-    status = xpsVlanSetUnknownSaCmd(mgr->dev_id, vlan_id, sa_miss_cmd);
+    status = xpsVlanSetUnknownSaCmd(mgr->xp_dev->id, vlan_id, sa_miss_cmd);
     if (status != XP_NO_ERR) {
         VLOG_ERR("%s: Could not set SA learning for the vlan %u, error code: %d",
                  __FUNCTION__, vlan_id, status);
@@ -283,7 +287,7 @@ ops_xp_vlan_member_add(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id,
 
     if (!ops_xp_is_tunnel_intf(intfId)) {
 
-        status = xpsVlanAddInterface(mgr->dev_id, vlan_id, intfId, encapType);
+        status = xpsVlanAddInterface(mgr->xp_dev->id, vlan_id, intfId, encapType);
         if (status != XP_NO_ERR) {
             VLOG_ERR("%s: Could not add interface %d to VLAN %d. "
                      "Error code: %d\n", 
@@ -292,7 +296,7 @@ ops_xp_vlan_member_add(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id,
         }
     } else {
 
-        status = xpsVlanAddEndpoint(mgr->dev_id, vlan_id, intfId,
+        status = xpsVlanAddEndpoint(mgr->xp_dev->id, vlan_id, intfId,
                                     encapType, vni);
         if (status != XP_NO_ERR) {
             VLOG_ERR("%s: Could not add interface %d to VLAN %d. "
@@ -345,7 +349,7 @@ ops_xp_vlan_member_remove(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id,
     }
 
     if (!ops_xp_is_tunnel_intf(intfId)) {
-        status = xpsVlanSetOpenFlowEnable(mgr->dev_id, vlan_id, intfId, 0);
+        status = xpsVlanSetOpenFlowEnable(mgr->xp_dev->id, vlan_id, intfId, 0);
         if (status != XP_NO_ERR) {
             VLOG_ERR("%s: Failed to remove interface/vlan pair %d:%d "
                      "from OpenFlow pipeline. Error code: %d\n",
@@ -354,7 +358,7 @@ ops_xp_vlan_member_remove(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id,
         }
     }
 
-    status = xpsVlanRemoveInterface(mgr->dev_id, vlan_id, intfId);
+    status = xpsVlanRemoveInterface(mgr->xp_dev->id, vlan_id, intfId);
     if (status != XP_NO_ERR) {
         VLOG_ERR("%s: Could not remove interface %u from vlan %d. "
                  "Error code: %d\n",
@@ -367,6 +371,10 @@ ops_xp_vlan_member_remove(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id,
     free(e);
 
     hmap_shrink(&mgr->table[vlan_id].members_table);
+
+    ovs_rwlock_wrlock(&mgr->xp_dev->ml->rwlock);
+    ops_xp_mac_learning_flush_vlan_intf(mgr->xp_dev->ml, vlan_id, intfId);
+    ovs_rwlock_unlock(&mgr->xp_dev->ml->rwlock);
 
     return ((status == XP_NO_ERR) ? 0 : EPERM);
 }
@@ -507,7 +515,7 @@ ops_xp_vlan_is_flooding(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id)
          return false;
     }
 
-    status = xpsVlanGetUnknownSaCmd(mgr->dev_id, vlan_id, &sa_miss_cmd);
+    status = xpsVlanGetUnknownSaCmd(mgr->xp_dev->id, vlan_id, &sa_miss_cmd);
     if (status != XP_NO_ERR) {
         VLOG_ERR("%s: Could not get SA learning for the vlan %u, error code: %d",
                  __FUNCTION__, vlan_id, status);

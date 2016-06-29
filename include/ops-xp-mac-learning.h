@@ -82,9 +82,11 @@ struct xp_mac_learning {
     size_t max_entries;             /* Max number of learned MACs. */
     struct ovs_refcount ref_cnt;
     struct ovs_rwlock rwlock;
+#ifdef OPS_XP_ML_EVENT_PROCESSING
     pthread_t ml_thread;         /* ML Thread ID. */
     struct latch exit_latch;     /* Tells child threads to exit. */
     struct latch event_latch;    /* Events receiving pipe of child thread. */
+#endif /* OPS_XP_ML_EVENT_PROCESSING */
     struct xpliant_dev *xpdev;
     /* Tables which store mac learning events destined for main
      * processing in OPS mac-learning-plugin. */
@@ -137,8 +139,7 @@ struct xp_mac_learning *ops_xp_mac_learning_create(struct xpliant_dev *xpdev,
                                                    unsigned int idle_time);
 struct xp_mac_learning *ops_xp_mac_learning_ref(const struct xp_mac_learning *);
 void ops_xp_mac_learning_unref(struct xp_mac_learning *);
-void ops_xp_mac_learning_on_ofproto_created(struct xp_mac_learning *ml,
-                                            struct ofproto_xpliant *ofproto);
+
 int ops_xp_mac_learning_set_idle_time(struct xp_mac_learning *ml,
                                       unsigned int idle_time)
     OVS_REQ_WRLOCK(ml->rwlock);
@@ -189,6 +190,11 @@ int ops_xp_mac_learning_flush_vlan(struct xp_mac_learning *ml,
 
 int ops_xp_mac_learning_flush_intfId(struct xp_mac_learning *ml,
                                      xpsInterfaceId_t  intfId)
+    OVS_REQ_WRLOCK(ml->rwlock);
+
+int ops_xp_mac_learning_flush_vlan_intf(struct xp_mac_learning *ml,
+                                        xpsVlan_t vlan_id,
+                                        xpsInterfaceId_t intf_id)
     OVS_REQ_WRLOCK(ml->rwlock);
 
 int ops_xp_mac_learning_process_vlan_removed(struct xp_mac_learning *ml,

@@ -45,10 +45,6 @@ typedef enum xp_host_if_trap_channel {
     XP_HOST_IF_TRAP_CHANNEL_CUSTOM_RANGE_BASE = 0x10000000
 } xp_host_if_trap_channel_t;
 
-/* TODO: Remove this declaration when this API is added to openXpsPort. */
-XP_STATUS xpsPortGetPortControlIntfId(xpsDevice_t devId, xpsPort_t portNum,
-                                      xpsInterfaceId_t *intfId);
-
 static int netdev_init(struct xpliant_dev *xp_dev);
 static int netdev_if_create(struct xpliant_dev *xp_dev, char *intf_name,
                             xpsInterfaceId_t xps_if_id,

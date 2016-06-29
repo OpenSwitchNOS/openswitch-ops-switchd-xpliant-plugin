@@ -130,8 +130,10 @@ ops_xp_mac_learning_create(struct xpliant_dev *xpdev, unsigned int idle_time)
 
     ovs_refcount_init(&ml->ref_cnt);
     ovs_rwlock_init(&ml->rwlock);
+#ifdef OPS_XP_ML_EVENT_PROCESSING
     latch_init(&ml->exit_latch);   
     latch_init(&ml->event_latch);
+#endif /* OPS_XP_ML_EVENT_PROCESSING */
     ml->plugin_interface = NULL;
     ml->curr_mlearn_table_in_use = 0;
 
@@ -153,9 +155,11 @@ ops_xp_mac_learning_create(struct xpliant_dev *xpdev, unsigned int idle_time)
 
     timer_set_duration(&ml->mlearn_timer, XP_ML_MLEARN_TIMER_TIMEOUT * 1000);
 
+#ifdef OPS_XP_ML_EVENT_PROCESSING
     /* Start event handling thread */
     ml->ml_thread = ovs_thread_create("ops-xp-ml-handler",
                                       mac_learning_events_handler, ml);
+#endif /* OPS_XP_ML_EVENT_PROCESSING */
 
     VLOG_INFO("XPliant device's FDB events processing thread started");
 
@@ -236,14 +240,18 @@ ops_xp_mac_learning_unref(struct xp_mac_learning *ml)
                      status);
         }
 
+#ifdef OPS_XP_ML_EVENT_PROCESSING
         latch_set(&ml->exit_latch);
         xpthread_join(ml->ml_thread, NULL);
+#endif /* OPS_XP_ML_EVENT_PROCESSING */
 
         ops_xp_mac_learning_flush(ml);
         hmap_destroy(&ml->table);
 
+#ifdef OPS_XP_ML_EVENT_PROCESSING
         latch_destroy(&ml->exit_latch);
         latch_destroy(&ml->event_latch);
+#endif /* OPS_XP_ML_EVENT_PROCESSING */
 
         bitmap_free(ml->flood_vlans);
 
@@ -722,6 +730,28 @@ ops_xp_mac_learning_flush_vlan(struct xp_mac_learning *ml, xpsVlan_t vlan_id)
     return 0;
 }
 
+/* Removes all entries associated with this VLAN and interface ID
+ * from the software and hardware FDB tables. */
+int
+ops_xp_mac_learning_flush_vlan_intf(struct xp_mac_learning *ml,
+                                    xpsVlan_t vlan_id,
+                                    xpsInterfaceId_t intf_id)
+{
+    struct xp_mac_entry *e = NULL;
+    struct xp_mac_entry *next = NULL;
+
+    ovs_assert(ml);
+
+    HMAP_FOR_EACH_SAFE (e, next, hmap_node, &ml->table) {
+        if ((e->xps_fdb_entry.vlanId == vlan_id) &&
+            (e->xps_fdb_entry.intfId == intf_id)) {
+            ops_xp_mac_learning_expire(ml, e);
+        }
+    }
+
+    return 0;
+}
+
 /* Processes vlan removed event.
  * Removes all entries with this vlan id from the software and
  * hardware FDB tables. */
@@ -732,6 +762,7 @@ ops_xp_mac_learning_process_vlan_removed(struct xp_mac_learning *ml,
     return ops_xp_mac_learning_flush_vlan(ml, vlan);
 }
 
+#ifdef OPS_XP_ML_EVENT_PROCESSING
 /* This handler thread receives incoming learning events
  * of different types and handles them correspondingly. */
 static void *
@@ -750,59 +781,60 @@ mac_learning_events_handler(void *arg)
         latch_wait(&ml->event_latch);
         poll_block();
 
-        do {
-            retval = read(ml->event_latch.fds[0], &event, sizeof(event));
-        } while (retval < 0 && errno == EINTR);
+        while (latch_is_set(&ml->event_latch)) {
+            do {
+                retval = read(ml->event_latch.fds[0], &event, sizeof(event));
+            } while (retval < 0 && errno == EINTR);
 
-        if (retval < 0) {
+            if (retval < 0) {
+                if (errno != EAGAIN) {
+                    VLOG_WARN_RL(&ml_rl, "Failed to receive event. %s.",
+                                 ovs_strerror(errno));
+                }
+                continue;
 
-            if (errno != EAGAIN) {
-                VLOG_WARN_RL(&ml_rl, "Failed to receive event. %s.",
-                             ovs_strerror(errno));
+            } else if (retval != sizeof(event)) {
+                VLOG_WARN("Incomplete event received");
+                continue;
             }
 
-            continue;
+            /*VLOG_DBG_RL(&ml_rl, "%s, Received event: %d Handling...",
+                        __FUNCTION__, event.type);*/
 
-        } else if (retval != sizeof(event)) {
-              VLOG_WARN("Incomplete event received");
-              continue;
-        }
+            switch (event.type) {
+            case XP_ML_LEARNING_EVENT:
+                ovs_rwlock_wrlock(&ml->rwlock);
+                ops_xp_mac_learning_learn(ml, &event.data.learning_data);
+                ovs_rwlock_unlock(&ml->rwlock);
+                break;
 
-        /*VLOG_DBG_RL(&ml_rl, "%s, Received event: %d Handling...", 
-                    __FUNCTION__, event.type);*/
+            case XP_ML_AGING_EVENT:
+                ovs_rwlock_wrlock(&ml->rwlock);
+                ops_xp_mac_learning_age_by_index(ml, event.data.index);
+                ovs_rwlock_unlock(&ml->rwlock);
+                break;
 
-        switch (event.type) {
-        case XP_ML_LEARNING_EVENT:
-            ovs_rwlock_wrlock(&ml->rwlock);
-            ops_xp_mac_learning_learn(ml, &event.data.learning_data);
-            ovs_rwlock_unlock(&ml->rwlock);
-            break;
+            case XP_ML_PORT_DOWN_EVENT:
+                ovs_rwlock_wrlock(&ml->rwlock);
+                ops_xp_mac_learning_process_port_down(ml, event.data.intfId);
+                ovs_rwlock_unlock(&ml->rwlock);
+                break;
 
-        case XP_ML_AGING_EVENT:
-            ovs_rwlock_wrlock(&ml->rwlock);
-            ops_xp_mac_learning_age_by_index(ml, event.data.index);
-            ovs_rwlock_unlock(&ml->rwlock);
-            break;
+            case XP_ML_VLAN_REMOVED_EVENT:
+                ovs_rwlock_wrlock(&ml->rwlock);
+                ops_xp_mac_learning_process_vlan_removed(ml, event.data.vlan);
+                ovs_rwlock_unlock(&ml->rwlock);
+                break;
 
-        case XP_ML_PORT_DOWN_EVENT:
-            ovs_rwlock_wrlock(&ml->rwlock);
-            ops_xp_mac_learning_process_port_down(ml, event.data.intfId);
-            ovs_rwlock_unlock(&ml->rwlock);
-            break;
-
-        case XP_ML_VLAN_REMOVED_EVENT:
-            ovs_rwlock_wrlock(&ml->rwlock);
-            ops_xp_mac_learning_process_vlan_removed(ml, event.data.vlan);
-            ovs_rwlock_unlock(&ml->rwlock);
-            break;
-
-        default:
-            break;
+            default:
+                break;
+            }
         }
     } /* while (!latch_is_set(&ml->exit_latch)) */
 
     VLOG_INFO("XPliant device's FDB events processing thread finished");
 }
+#endif /* OPS_XP_ML_EVENT_PROCESSING */
 
 /* Learning event handler registered in XDK.
  * Sends xp_ml_event event to software FDB task. */
@@ -816,7 +848,11 @@ ops_xp_mac_learning_on_learning(xpsDevice_t devId OVS_UNUSED,
     struct xp_mac_learning *ml = (struct xp_mac_learning *)userData;
     uint8_t *srcMacAddr = (uint8_t *)(buf + XP_MAC_ADDR_LEN);
     int retval = 0;
+#ifdef OPS_XP_ML_EVENT_PROCESSING
     struct xp_ml_event event;
+#else
+    struct xp_ml_learning_data learning_data;
+#endif /* OPS_XP_ML_EVENT_PROCESSING */
 
     ovs_assert(ml);
 
@@ -826,6 +862,7 @@ ops_xp_mac_learning_on_learning(xpsDevice_t devId OVS_UNUSED,
         return XP_ERR_INVALID_DATA;
     }
 
+#ifdef OPS_XP_ML_EVENT_PROCESSING
     memset(&event, 0, sizeof(event));
 
     event.type = XP_ML_LEARNING_EVENT;
@@ -849,6 +886,21 @@ ops_xp_mac_learning_on_learning(xpsDevice_t devId OVS_UNUSED,
                      "incomplete data sent");
         return XP_ERR_SOCKET_SEND;
     }
+#else
+    memset(&learning_data, 0, sizeof(learning_data));
+
+    ops_xp_mac_copy_and_reverse(learning_data.xps_fdb_entry.macAddr,
+                                srcMacAddr);
+
+    learning_data.xps_fdb_entry.vlanId = bdId;
+    learning_data.xps_fdb_entry.intfId = ingressVif;
+    learning_data.xps_fdb_entry.isStatic = 0;
+    learning_data.reasonCode = reasonCode;
+
+    ovs_rwlock_wrlock(&ml->rwlock);
+    ops_xp_mac_learning_learn(ml, &learning_data);
+    ovs_rwlock_unlock(&ml->rwlock);
+#endif /* OPS_XP_ML_EVENT_PROCESSING */
 
     return XP_NO_ERR;
 }
@@ -859,11 +911,14 @@ void
 ops_xp_mac_learning_on_aging(xpsDevice_t devId, uint32_t *index, void *userData)
 {
     struct xp_mac_learning *ml = userData;
-    struct xp_ml_event event;
     int retval = 0;
+#ifdef OPS_XP_ML_EVENT_PROCESSING
+    struct xp_ml_event event;
+#endif /* OPS_XP_ML_EVENT_PROCESSING */
 
     ovs_assert(ml);
 
+#ifdef OPS_XP_ML_EVENT_PROCESSING
     event.type = XP_ML_AGING_EVENT;
     event.data.index = *index;
 
@@ -875,6 +930,11 @@ ops_xp_mac_learning_on_aging(xpsDevice_t devId, uint32_t *index, void *userData)
                      (retval < 0) ? ovs_strerror(errno) :
                      "incomplete data sent");
     }
+#else
+    ovs_rwlock_wrlock(&ml->rwlock);
+    ops_xp_mac_learning_age_by_index(ml, *index);
+    ovs_rwlock_unlock(&ml->rwlock);
+#endif /* OPS_XP_ML_EVENT_PROCESSING */
 
     return;
 }
@@ -885,10 +945,13 @@ int
 ops_xp_mac_learning_on_vlan_removed(struct xp_mac_learning *ml, xpsVlan_t vlanId)
 {
     int retval = 0;
+#ifdef OPS_XP_ML_EVENT_PROCESSING
     struct xp_ml_event event;
+#endif /* OPS_XP_ML_EVENT_PROCESSING */
 
     ovs_assert(ml);
 
+#ifdef OPS_XP_ML_EVENT_PROCESSING
     event.type = XP_ML_VLAN_REMOVED_EVENT;
     event.data.vlan = vlanId;
 
@@ -903,6 +966,11 @@ ops_xp_mac_learning_on_vlan_removed(struct xp_mac_learning *ml, xpsVlan_t vlanId
                   ovs_strerror(errno));
         return retval;
     }
+#else
+    ovs_rwlock_wrlock(&ml->rwlock);
+    ops_xp_mac_learning_process_vlan_removed(ml, vlanId);
+    ovs_rwlock_unlock(&ml->rwlock);
+#endif /* OPS_XP_ML_EVENT_PROCESSING */
 
     return 0;
 }
@@ -914,10 +982,13 @@ ops_xp_mac_learning_on_port_down(struct xp_mac_learning *ml,
                                  xpsInterfaceId_t intfId)
 {
     int retval = 0;
+#ifdef OPS_XP_ML_EVENT_PROCESSING
     struct xp_ml_event event;
+#endif /* OPS_XP_ML_EVENT_PROCESSING */
 
     ovs_assert(ml);
 
+#ifdef OPS_XP_ML_EVENT_PROCESSING
     event.type = XP_ML_PORT_DOWN_EVENT;
     event.data.intfId = intfId;
 
@@ -936,6 +1007,11 @@ ops_xp_mac_learning_on_port_down(struct xp_mac_learning *ml,
                   ovs_strerror(errno));
         return retval;
     }
+#else
+    ovs_rwlock_wrlock(&ml->rwlock);
+    ops_xp_mac_learning_process_port_down(ml, intfId);
+    ovs_rwlock_unlock(&ml->rwlock);
+#endif /* OPS_XP_ML_EVENT_PROCESSING */
 
     return 0;
 }
