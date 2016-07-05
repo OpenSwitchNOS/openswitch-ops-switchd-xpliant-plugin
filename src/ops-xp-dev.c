@@ -695,10 +695,15 @@ cleanup_cb(void* aux)
 
 /* Get storage for port related information */
 struct xp_port_info *
-ops_xp_dev_get_port_info(struct xpliant_dev * const xpdev, xpsPort_t port_num)
+ops_xp_dev_get_port_info(xpsDevice_t id, xpsPort_t port_num)
 {
-    if (port_num < XP_MAX_TOTAL_PORTS) {
-        return &xpdev->port_info[port_num];
+    struct xpliant_dev *dev;
+
+    dev = _xp_dev_by_id(id);
+    if (dev) {
+        if (port_num < XP_MAX_TOTAL_PORTS) {
+            return &dev->port_info[port_num];
+        }
     }
 
     return NULL;

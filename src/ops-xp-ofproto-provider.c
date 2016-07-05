@@ -68,8 +68,6 @@
 
 VLOG_DEFINE_THIS_MODULE(xp_ofproto_provider);
 
-static const char* DATAPATH_TYPE_XPLIANT = "system";
-
 /* Global variables */
 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
 
@@ -1095,7 +1093,6 @@ bundle_del_port(struct ofport_xpliant *port)
                 VLOG_ERR("%s: Could not add interface: %u to default vlan: %d "
                          "Err=%d", __FUNCTION__, netdev->ifId,
                          XP_DEFAULT_VLAN_ID, rc);
-                return;
             }
         } else {
             rc = ops_xp_vlan_member_set_tagging(netdev->xpdev->vlan_mgr,
@@ -1107,10 +1104,10 @@ bundle_del_port(struct ofport_xpliant *port)
                          "on default vlan: %d Err=%d", __FUNCTION__,
                          netdev->ifId, XP_DEFAULT_VLAN_ID, rc);
             }
-        }
 
-        ops_xp_port_default_vlan_set(netdev->xpdev->id, netdev->port_num,
-                                     XP_DEFAULT_VLAN_ID);
+            ops_xp_port_default_vlan_set(netdev->xpdev->id, netdev->port_num,
+                                         XP_DEFAULT_VLAN_ID);
+        }
     }
 }
 
@@ -1118,6 +1115,7 @@ static bool
 bundle_add_port(struct bundle_xpliant *bundle, ofp_port_t ofp_port)
 {
     struct ofport_xpliant *port;
+    int rc = 0;
 
     VLOG_INFO("bundle_add_port: bundle.%s, ofp_port.%u",
               bundle ? bundle->name : "_", ofp_port);
@@ -1139,6 +1137,22 @@ bundle_add_port(struct bundle_xpliant *bundle, ofp_port_t ofp_port)
         if ((port->up.pp.config & OFPUTIL_PC_NO_FLOOD)
             || !stp_forward_in_state(port->stp_state)) {
             bundle->floodable = false;
+        }
+
+        /* As the port is going to be a part of the bundle need to remove it from
+         * the default VLAN as membership will be applied based on bundle config */
+        if (is_xpliant_class(netdev_get_class(port->up.netdev))) {
+
+            struct netdev_xpliant *netdev = netdev_xpliant_cast(port->up.netdev);
+
+            rc = ops_xp_vlan_member_remove(netdev->xpdev->vlan_mgr,
+                                           XP_DEFAULT_VLAN_ID,
+                                           netdev->ifId);
+            if (rc) {
+                VLOG_ERR("%s: Could not remove interface: %u from default vlan: %d "
+                         "Err=%d", __FUNCTION__, netdev->ifId,
+                         XP_DEFAULT_VLAN_ID, rc);
+            }
         }
 
         bundle->ports_updated = true;
@@ -1166,19 +1180,6 @@ bundle_update_vlan_config(struct ofproto_xpliant *ofproto,
 
     old_vlan = (bundle->vlan != -1) ? bundle->vlan : XP_DEFAULT_VLAN_ID;
     old_vlan_mode = bundle->vlan_mode;
-
-    /* On system init each physical port is added to a default VLAN in order to
-     * make LACP packets not dropped in pipeline. We have to reflect this in 
-     * bundle vlan membership bitmap. */
-    if ((bundle->vlan == -1) && (s->n_slaves == 1) &&
-        ops_xp_vlan_port_is_member(ofproto->vlan_mgr, XP_DEFAULT_VLAN_ID,
-                                   bundle->intfId)) {
-        if (!bundle->trunks) {
-            bundle->trunks = bitmap_allocate(XP_VLAN_MAX_COUNT);
-        }
-
-        bitmap_set1(bundle->trunks, XP_DEFAULT_VLAN_ID);
-    }
 
     /* NOTE: "bundle" holds previous VLAN configuration (if any).
      * "s" holds current desired VLAN configuration. */
@@ -1214,7 +1215,7 @@ bundle_update_vlan_config(struct ofproto_xpliant *ofproto,
 
     case PORT_VLAN_TRUNK:
         if (!s->trunks) {
-            trunks = bitmap_allocate1(XP_VLAN_MAX_COUNT);
+            trunks = bitmap_allocate(XP_VLAN_MAX_COUNT);
         } else {
             trunks = s->trunks;
         }
@@ -1225,21 +1226,13 @@ bundle_update_vlan_config(struct ofproto_xpliant *ofproto,
 
     case PORT_VLAN_NATIVE_UNTAGGED:
     case PORT_VLAN_NATIVE_TAGGED:
-        if ((vlan != XP_DEFAULT_VLAN_ID) && (!s->trunks
-                          || !bitmap_is_set(s->trunks, vlan)
-                          || bitmap_is_set(s->trunks, XP_DEFAULT_VLAN_ID))) {
-            /* Force trunking the native VLAN and prohibit
-             * trunking default VLAN */
-            if (s->trunks) {
-                trunks = bitmap_clone(s->trunks, XP_VLAN_MAX_COUNT);
-            } else {
-                trunks = bitmap_allocate1(XP_VLAN_MAX_COUNT);
-            }
-            bitmap_set1(trunks, vlan);
-            bitmap_set0(trunks, XP_DEFAULT_VLAN_ID);
+        if (s->trunks) {
+            trunks = bitmap_clone(s->trunks, XP_VLAN_MAX_COUNT);
         } else {
-            trunks = s->trunks;
+            trunks = bitmap_allocate(XP_VLAN_MAX_COUNT);
         }
+        /* Force trunking the native VLAN */
+        bitmap_set1(trunks, vlan);
         break;
 
     default:
@@ -1343,43 +1336,16 @@ bundle_update_vlan_config(struct ofproto_xpliant *ofproto,
                                   bundle->intfId, bundle->vlan, *bundle->trunks,
                                   vid, encapType);
 
-                        if ((vid == XP_DEFAULT_VLAN_ID) &&
-                            ops_xp_vlan_port_is_member(ofproto->vlan_mgr,
-                                                       (xpsVlan_t)vid,
-                                                        bundle->intfId)) {
-
-                            retVal = ops_xp_vlan_member_set_tagging(
-                                              ofproto->vlan_mgr,
-                                              XP_DEFAULT_VLAN_ID,
-                                              bundle->intfId,
-                                              encapType == XP_L2_ENCAP_DOT1Q_TAGGED,
-                                              0);
-                        } else {
-                            retVal = ops_xp_vlan_member_add(ofproto->vlan_mgr, vid,
-                                                            bundle->intfId,
-                                                            encapType, 0);
-                        }
+                        retVal = ops_xp_vlan_member_add(ofproto->vlan_mgr, vid,
+                                                        bundle->intfId,
+                                                        encapType, 0);
                         if (retVal) {
                             return retVal;
                         }
                     } else {
-                        if ((vid == XP_DEFAULT_VLAN_ID)) {
-                            if (ops_xp_vlan_port_is_tagged_member(ofproto->vlan_mgr,
-                                                                  (xpsVlan_t)vid,
-                                                                  bundle->intfId)) {
-
-                                retVal = ops_xp_vlan_member_set_tagging(
-                                                  ofproto->vlan_mgr,
-                                                  XP_DEFAULT_VLAN_ID,
-                                                  bundle->intfId,
-                                                  false, 0);
-                            }
-                        } else {
-                            retVal = ops_xp_vlan_member_remove(ofproto->vlan_mgr,
-                                                               vid,
-                                                               bundle->intfId);
-                        }
-
+                        retVal = ops_xp_vlan_member_remove(ofproto->vlan_mgr,
+                                                           vid,
+                                                           bundle->intfId);
                         if (retVal) {
                             return retVal;
                         }
@@ -1979,28 +1945,10 @@ ofproto_xpliant_bundle_set(struct ofproto *ofproto_, void *aux,
         struct ofport_xpliant *port;
         xpsVlan_t vlan_id = 0;
         const char *type = NULL;
-        xpsInterfaceId_t intf_id = XPS_INTF_INVALID_ID;
 
         port = get_ofp_port(bundle->ofproto, s->slaves[0]);
         if (!port) {
             VLOG_ERR("slave is not in the ports");
-        }
-
-        intf_id = ops_xp_get_ofport_intf_id(port);
-
-        /* Remove port from default VLAN. */
-        if (!bundle->l3_intf &&
-            (intf_id != XPS_INTF_INVALID_ID) &&
-            ops_xp_vlan_port_is_member(ofproto->vlan_mgr, XP_DEFAULT_VLAN_ID,
-                                       intf_id)) {
-
-            ret_val = ops_xp_vlan_member_remove(ofproto->vlan_mgr,
-                                                XP_DEFAULT_VLAN_ID,
-                                                intf_id);
-            if (ret_val) {
-                VLOG_ERR("%s, Could not remove interface: %u from default VLAN",
-                         __FUNCTION__, intf_id);
-            }
         }
 
         type = netdev_get_type(port->up.netdev);
@@ -2188,23 +2136,9 @@ ofproto_xpliant_set_vlan(struct ofproto *ofproto_, int vid, bool add)
                     (bundle->vlan_mode == PORT_VLAN_NATIVE_TAGGED))
                                           ? XP_L2_ENCAP_DOT1Q_TAGGED
                                           : XP_L2_ENCAP_DOT1Q_UNTAGGED;
-
-                if ((vid == XP_DEFAULT_VLAN_ID) &&
-                    ops_xp_vlan_port_is_member(ofproto->vlan_mgr,
-                                               (xpsVlan_t)vid,
-                                                bundle->intfId)) {
-
-                    status = ops_xp_vlan_member_set_tagging(
-                                      ofproto->vlan_mgr,
-                                      XP_DEFAULT_VLAN_ID,
-                                      bundle->intfId,
-                                      encapType == XP_L2_ENCAP_DOT1Q_TAGGED, 0);
-                } else {
-                    status = ops_xp_vlan_member_add(ofproto->vlan_mgr,
-                                                    (xpsVlan_t)vid,
-                                                    bundle->intfId, encapType, 0);
-                }
-
+                status = ops_xp_vlan_member_add(ofproto->vlan_mgr,
+                                                (xpsVlan_t)vid,
+                                                bundle->intfId, encapType, 0);
                 if (status) {
                     return EPERM;
                 }
@@ -2214,22 +2148,9 @@ ofproto_xpliant_set_vlan(struct ofproto *ofproto_, int vid, bool add)
         /* Delete this VLAN from any port specified by 'trunks' map */
         HMAP_FOR_EACH (bundle, hmap_node, &ofproto->bundles) {
             if (bundle->trunks && bitmap_is_set(bundle->trunks, vid)) {
-                if ((vid == XP_DEFAULT_VLAN_ID)) {
-                    if (ops_xp_vlan_port_is_tagged_member(ofproto->vlan_mgr,
-                                                          (xpsVlan_t)vid,
-                                                          bundle->intfId)) {
-
-                        status = ops_xp_vlan_member_set_tagging(ofproto->vlan_mgr,
-                                                                XP_DEFAULT_VLAN_ID,
-                                                                bundle->intfId,
-                                                                false, 0);
-                    }
-                } else {
-                    status = ops_xp_vlan_member_remove(ofproto->vlan_mgr,
-                                                       (xpsVlan_t)vid,
-                                                       bundle->intfId);
-                }
-
+                status = ops_xp_vlan_member_remove(ofproto->vlan_mgr,
+                                                   (xpsVlan_t)vid,
+                                                   bundle->intfId);
                 if (status) {
                     return EPERM;
                 }
@@ -2247,8 +2168,9 @@ ofproto_xpliant_set_vlan(struct ofproto *ofproto_, int vid, bool add)
                 }
             }
         }
+
         ops_xp_mac_learning_on_vlan_removed(ofproto->vlan_mgr->xp_dev->ml, 
-                                           (xpsVlan_t)vid);
+                                            (xpsVlan_t)vid);
     }
 
     return 0;

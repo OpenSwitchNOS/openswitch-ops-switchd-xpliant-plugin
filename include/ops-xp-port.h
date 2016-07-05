@@ -64,9 +64,9 @@ int ops_xp_port_mac_mode_set(struct xp_port_info *p_info, xpMacConfigMode mac_mo
 
 int ops_xp_port_set_config(struct netdev_xpliant *netdev, const struct port_cfg *pcfg);
 
-int ops_xp_port_get_enable(struct netdev_xpliant *netdev, bool *enable);
+int ops_xp_port_get_enable(xpsDevice_t id, xpsPort_t port_num, bool *enable);
 
-int ops_xp_port_set_enable(struct netdev_xpliant *netdev, bool enable);
+int ops_xp_port_set_enable(xpsDevice_t id, xpsPort_t port_num, bool enable);
 
 void *ops_xp_port_event_handler(void *arg);
 

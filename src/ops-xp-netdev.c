@@ -38,6 +38,7 @@
 #include "ops-xp-util.h"
 #include "ops-xp-host.h"
 #include "ops-xp-vlan.h"
+#include "ops-xp-mac-learning.h"
 #include "openXpsMac.h"
 #include "openXpsQos.h"
 #include "openXpsPolicer.h"
@@ -317,7 +318,7 @@ netdev_xpliant_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
         netdev->vif = port_config.ingressVif;
 
         /* Get the port_info struct for a given hardware unit & port number. */
-        port_info = ops_xp_dev_get_port_info(netdev->xpdev, netdev->port_num);
+        port_info = ops_xp_dev_get_port_info(netdev->xpdev->id, netdev->port_num);
         if (NULL == port_info) {
             VLOG_ERR("Unable to get port info struct for "
                      "Interface=%s, devId=%d, port_num=%d",
@@ -693,7 +694,7 @@ netdev_xpliant_update_flags(struct netdev *netdev_,
     ovs_mutex_lock(&netdev->mutex);
 
     /* Get the current state to update the old flags. */
-    rc = ops_xp_port_get_enable(netdev, &state);
+    rc = ops_xp_port_get_enable(netdev->xpdev->id, netdev->port_num, &state);
     if (!rc) {
         if (state) {
             *old_flagsp |= NETDEV_UP;
@@ -703,9 +704,11 @@ netdev_xpliant_update_flags(struct netdev *netdev_,
 
         /* Set the new state to that which is desired. */
         if (on & NETDEV_UP) {
-            rc = ops_xp_port_set_enable(netdev, true);
+            rc = ops_xp_port_set_enable(netdev->xpdev->id,
+                                        netdev->port_num, true);
         } else if (off & NETDEV_UP) {
-            rc = ops_xp_port_set_enable(netdev, false);
+            rc = ops_xp_port_set_enable(netdev->xpdev->id,
+                                        netdev->port_num, false);
         }
     }
 
@@ -822,6 +825,9 @@ ops_xp_netdev_link_state_callback(struct netdev_xpliant *netdev,
 
     if (link_status) {
         netdev->link_resets++;
+    } else {
+        /* Notify ML that port is down */
+        ops_xp_mac_learning_on_port_down(netdev->xpdev->ml, netdev->ifId);
     }
 
     netdev_change_seq_changed(&(netdev->up));
@@ -1569,7 +1575,8 @@ netdev_xpliant_subintf_update_flags(struct netdev *netdev_,
 
             ovs_mutex_lock(&parent_netdev->mutex);
 
-            rc = ops_xp_port_get_enable(parent_netdev, &state);
+            rc = ops_xp_port_get_enable(parent_netdev->xpdev->id,
+                                        parent_netdev->port_num, &state);
             if (!rc) {
                 if (state) {
                     parent_flagsp |= NETDEV_UP;

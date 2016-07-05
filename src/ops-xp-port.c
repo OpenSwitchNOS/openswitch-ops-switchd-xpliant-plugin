@@ -37,6 +37,7 @@
 #include "openXpsQos.h"
 #include "openXpsPolicer.h"
 #include "openXpsMac.h"
+#include "ops-xp-dev.h"
 #include "ops-xp-dev-init.h"
 #include "ops-xp-mac-learning.h"
 
@@ -49,8 +50,9 @@ int
 ops_xp_port_mac_mode_set(struct xp_port_info *p_info, xpMacConfigMode mac_mode)
 {
     XP_STATUS status = XP_NO_ERR;
+    struct xp_port_info *port_info;
     uint8_t mac_num;
-    int i = 0;
+    int rc, port_cnt, i = 0;
 
     if (mac_mode == p_info->port_mac_mode) {
         /* Already in the correct lane split state. */
@@ -68,7 +70,7 @@ ops_xp_port_mac_mode_set(struct xp_port_info *p_info, xpMacConfigMode mac_mode)
     status = xpsMacGetMacNumForPortNum(p_info->id, p_info->port_num, &mac_num);
     if (status != XP_NO_ERR) {
         XP_UNLOCK();
-        VLOG_ERR("%s: unable to get MAC number for port %u. Err=%u",
+        VLOG_ERR("%s: unable to get MAC number for port %u. Err=%d",
                  __FUNCTION__, p_info->port_num, status);
         return EFAULT;
     }
@@ -79,13 +81,34 @@ ops_xp_port_mac_mode_set(struct xp_port_info *p_info, xpMacConfigMode mac_mode)
                                        (mac_mode == MAC_MODE_1X100GB));
     XP_UNLOCK();
     if (status != XP_NO_ERR) {
-        VLOG_ERR("%s: unable to set %u MAC mode. Err=%u",
+        VLOG_ERR("%s: unable to set %u MAC mode. Err=%d",
                  __FUNCTION__, mac_mode, status);
         return EFAULT;
     }
 
+    if (mac_mode == MAC_MODE_4X10GB) {
+        port_cnt = p_info->split_port_count;
+    } else {
+        port_cnt = 1;
+    }
+
+    for (i = 0; i < port_cnt; i++) {
+        /* Disable ports on split/no-split */
+        port_info = ops_xp_dev_get_port_info(p_info->id, p_info->port_num + i);
+        if (port_info) {
+            XP_LOCK();
+            status = xpsMacPortEnable(port_info->id, port_info->port_num, false);
+            if (status != XP_NO_ERR) {
+                VLOG_ERR("%s: unable to set port enable. Err=%d",
+                         __FUNCTION__, status);
+                return EFAULT;
+            }
+            XP_UNLOCK();
+            port_info->hw_enable = false;
+        }
+    }
+
     p_info->port_mac_mode = mac_mode;
-    p_info->serdes_tuned = false;
 
     return 0;
 
@@ -268,12 +291,6 @@ ops_xp_port_set_config(struct netdev_xpliant *netdev,
 
             unlink_netdev(netdev);
 
-            rc = ops_xp_port_set_enable(netdev, false);
-            if (rc) {
-                VLOG_WARN("%s: failed to disable port #%u. Err=%d",
-                          __FUNCTION__, netdev->ifId, rc);
-            }
-
             XP_LOCK();
             status = xpsPolicerEnablePortPolicing(netdev->port_num, 0);
             if (status != XP_NO_ERR) {
@@ -305,6 +322,9 @@ ops_xp_port_set_config(struct netdev_xpliant *netdev,
             XP_UNLOCK();
 
             netdev->link_status = false;
+
+            /* Notify ML that port is down */
+            ops_xp_mac_learning_on_port_down(netdev->xpdev->ml, netdev->ifId);
 
         } else {
 
@@ -362,12 +382,6 @@ ops_xp_port_set_config(struct netdev_xpliant *netdev,
             }
 #endif /* XP_DEV_EVENT_MODE */
             XP_UNLOCK();
-
-            rc = ops_xp_port_set_enable(netdev, true);
-            if (rc) {
-                VLOG_WARN("%s: failed to enable port #%u. Err=%d",
-                          __FUNCTION__, netdev->ifId, rc);
-            }
         }
     }
 
@@ -387,15 +401,13 @@ ops_xp_port_set_config(struct netdev_xpliant *netdev,
             xp_rc = xpsMacSetRxMaxFrmLen(netdev->xpdev->id, netdev->port_num, (uint16_t)pcfg.mtu);
         }
 #endif
-        XP_LOCK();
-        status = xpsMacGetLinkStatus(netdev->xpdev->id, netdev->port_num, &link);
-        if (status != XP_NO_ERR) {
-            VLOG_WARN("%s: could not get %u port link status. Err=%d",
-                      __FUNCTION__, netdev->port_num, status);
-        }
-        XP_UNLOCK();
+    }
 
-        netdev->link_status = !!link;
+    rc = ops_xp_port_set_enable(netdev->xpdev->id, netdev->port_num,
+                                new_cfg->enable);
+    if (rc) {
+        VLOG_WARN("%s: failed to set enable to %d for port #%u. Err=%d",
+                  __FUNCTION__, new_cfg->enable, netdev->port_num, rc);
     }
 
     /* Update the netdev struct with new config. */
@@ -405,9 +417,9 @@ ops_xp_port_set_config(struct netdev_xpliant *netdev,
 }
 
 int
-ops_xp_port_get_enable(struct netdev_xpliant *netdev, bool *enable)
+ops_xp_port_get_enable(xpsDevice_t id, xpsPort_t port_num, bool *enable)
 {
-    struct xp_port_info *port_info = netdev->port_info;
+    struct xp_port_info *port_info = ops_xp_dev_get_port_info(id, port_num);
 
     if (port_info) {
         *enable = port_info->hw_enable;
@@ -418,9 +430,9 @@ ops_xp_port_get_enable(struct netdev_xpliant *netdev, bool *enable)
 }
 
 int
-ops_xp_port_set_enable(struct netdev_xpliant *netdev, bool enable)
+ops_xp_port_set_enable(xpsDevice_t id, xpsPort_t port_num, bool enable)
 {
-    struct xp_port_info *port_info = netdev->port_info;
+    struct xp_port_info *port_info = ops_xp_dev_get_port_info(id, port_num);
     XP_STATUS status = XP_NO_ERR;
     if (port_info) {
         if (port_info->hw_enable != enable) {
@@ -433,10 +445,6 @@ ops_xp_port_set_enable(struct netdev_xpliant *netdev, bool enable)
             if (enable) {
                 /* We must tune port after it is enabled */
                 port_info->serdes_tuned = false;
-            } else {
-                /* Notify ML that port is down */
-                ops_xp_mac_learning_on_port_down(netdev->xpdev->ml,
-                                                 netdev->ifId);
             }
         }
     } else {

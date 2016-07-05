@@ -84,7 +84,7 @@ int ops_xp_dev_init(struct xpliant_dev * dev);
 bool ops_xp_dev_is_initialized(const struct xpliant_dev *dev);
 void ops_xp_mutex_lock(void);
 void ops_xp_mutex_unlock(void);
-struct xp_port_info *ops_xp_dev_get_port_info(struct xpliant_dev * const xpdev,
+struct xp_port_info *ops_xp_dev_get_port_info(xpsDevice_t id,
                                               xpsPort_t port_num);
 int ops_xp_dev_send(xpsDevice_t xp_dev_id, xpsInterfaceId_t dst_if_id,
                     void *buff, uint16_t buff_size);
