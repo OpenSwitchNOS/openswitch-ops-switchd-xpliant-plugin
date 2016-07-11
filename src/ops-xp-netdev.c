@@ -1183,6 +1183,7 @@ const struct netdev_class netdev_xpliant_class =
     netdev_xpliant_get_carrier_resets,
     NULL,                       /* set_miimon_interval */
     netdev_xpliant_get_stats,
+    NULL,                       /* clear statistics */
     netdev_xpliant_get_features,
     NULL,                       /* set_advertisements */
 
@@ -1456,6 +1457,7 @@ static const struct netdev_class netdev_xpliant_internal_class = {
     NULL,                       /* get_carrier_resets */
     NULL,                       /* get_miimon */
     netdev_xpliant_internal_get_stats,
+    NULL,                       /* clear statistics */
 
     NULL,                       /* get_features */
     NULL,                       /* set_advertisements */
@@ -1632,6 +1634,7 @@ static const struct netdev_class netdev_xpliant_subintf_class = {
     NULL,                       /* get_carrier_resets */
     NULL,                       /* get_miimon */
     NULL,                       /* get_stats */
+    NULL,                       /* clear statistics */
 
     NULL,                       /* get_features */
     NULL,                       /* set_advertisements */
@@ -1723,6 +1726,7 @@ static const struct netdev_class netdev_xpliant_l3_loopback_class = {
     NULL,                       /* get_carrier_resets */
     NULL,                       /* get_miimon */
     NULL,                       /* get_stats */
+    NULL,                       /* clear statistics */
 
     NULL,                       /* get_features */
     NULL,                       /* set_advertisements */
