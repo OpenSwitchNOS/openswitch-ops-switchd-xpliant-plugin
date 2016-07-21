@@ -137,14 +137,23 @@ netdev_if_filter_create(char *filter_name, struct xpliant_dev *xp_dev,
                         xpsInterfaceId_t xps_if_id,
                         int xpnet_if_id, int *xpnet_filter_id)
 {
-    xpsInterfaceId_t send_if_id;
+    xpsInterfaceId_t send_if_id = xps_if_id;
+    xpsInterfaceType_e if_type;
     XP_STATUS status = XP_NO_ERR;
 
-    status = xpsPortGetPortControlIntfId(xp_dev->id, xps_if_id, &send_if_id);
-    if (status) {
-        VLOG_ERR("%s, Unable to get control interface ID for port: %u. ERR%u",
-                 __FUNCTION__, xps_if_id, status);
+    status = xpsInterfaceGetType(xps_if_id, &if_type);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("%s, Failed to get interface type. Error: %d", 
+                 __FUNCTION__, status);
         return EPERM;
+    }
+
+    if (if_type == XPS_PORT) {
+        status = xpsPortGetPortControlIntfId(xp_dev->id, xps_if_id, &send_if_id);
+        if (status) {
+            VLOG_ERR("%s, Unable to get control interface ID for port: %u. ERR%u",
+                     __FUNCTION__, xps_if_id, status);
+        }
     }
 
     if (XP_NO_ERR != xpsNetdevIfTxHeaderSet(xp_dev->id, xpnet_if_id, send_if_id,

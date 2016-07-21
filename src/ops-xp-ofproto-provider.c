@@ -355,7 +355,7 @@ ofproto_xpliant_destruct(struct ofproto *ofproto_)
 
     VLOG_INFO("%s: up.name %s", __FUNCTION__, ofproto->up.name);
 
-    ops_xp_l3_mgr_unref(ofproto->l3_mgr);
+    ops_xp_l3_mgr_unref(ofproto);
 
     hmap_remove(&all_ofproto_xpliant, &ofproto->all_ofproto_xpliant_node);
 
@@ -1486,6 +1486,100 @@ bundle_update_single_slave_config(struct ofproto_xpliant *ofproto,
     return 0;
 }
 
+/* Updates L3 configuration. */
+void
+bundle_update_l3_config(struct ofproto_xpliant *ofproto,
+                        struct bundle_xpliant *bundle,
+                        const struct ofproto_bundle_settings *s)
+{
+    struct ofport_xpliant *port;
+    xpsVlan_t vlan_id = 0;
+    const char *type = NULL;
+
+    ovs_assert(ofproto);
+    ovs_assert(bundle);
+    ovs_assert(s);
+
+    port = get_ofp_port(bundle->ofproto, s->slaves[0]);
+    if (!port) {
+        VLOG_ERR("slave is not in the ports");
+    }
+
+    type = netdev_get_type(port->up.netdev);
+
+    /* For internal vlan interfaces, we get vlanid from tag column
+     * For regular l3 interfaces we will get from internal vlan id from
+     * hw_config column
+     */
+    if (STR_EQ(type, OVSREC_INTERFACE_TYPE_INTERNAL)) {
+        vlan_id = s->vlan;
+    } else if (STR_EQ(type, OVSREC_INTERFACE_TYPE_VLANSUBINT)) {
+        ops_xp_netdev_get_subintf_vlan(port->up.netdev, &vlan_id);
+    } else {
+        vlan_id = smap_get_int(s->port_options[PORT_HW_CONFIG],
+                               "internal_vlan_id", 0);
+    }
+
+    if (bundle->l3_intf) {
+        /* if reserved vlan changed/removed or if port status is disabled */
+        if (bundle->l3_intf->vlan_id != vlan_id || !s->enable) {
+            ops_xp_routing_disable_l3_interface(ofproto, bundle->l3_intf);
+            bundle->l3_intf = NULL;
+
+        } else if (s->enable && bundle->is_lag && bundle->ports_updated) {
+            /* Ports were updated so need to update PVID. */
+            struct ofport_xpliant *lag_port;
+            LIST_FOR_EACH (lag_port, bundle_node, &bundle->ports) {
+                ops_xp_port_default_vlan_set(ofproto->xpdev->id,
+                                             ops_xp_get_ofport_number(lag_port),
+                                             vlan_id);
+            }
+        }
+    }
+
+    if (vlan_id && !bundle->l3_intf && s->enable) {
+        struct eth_addr mac;
+
+        netdev_get_etheraddr(port->up.netdev, &mac);
+
+        VLOG_INFO("%s: NETDEV %s, MAC "ETH_ADDR_FMT" VLAN %u",
+                  __FUNCTION__, netdev_get_name(port->up.netdev),
+                  ETH_ADDR_ARGS(mac), vlan_id);
+
+        if (STR_EQ(type, OVSREC_INTERFACE_TYPE_SYSTEM)) {
+            if (!bundle->is_lag) {
+                bundle->intfId = ops_xp_get_ofport_intf_id(port);
+            }
+            bundle->l3_intf = \
+                    ops_xp_routing_enable_l3_interface(ofproto,
+                                                       bundle->intfId,
+                                                       bundle->name,
+                                                       vlan_id, mac.ea);
+            /* Update PVID */
+            LIST_FOR_EACH (port, bundle_node, &bundle->ports) {
+                ops_xp_port_default_vlan_set(ofproto->xpdev->id,
+                                             ops_xp_get_ofport_number(port),
+                                             vlan_id);
+            }
+        } else if (STR_EQ(type, OVSREC_INTERFACE_TYPE_VLANSUBINT)) {
+            bundle->intfId = ops_xp_get_ofport_intf_id(port);
+            bundle->l3_intf = \
+                    ops_xp_routing_enable_l3_subinterface(ofproto,
+                                                          bundle->intfId,
+                                                          bundle->name,
+                                                          vlan_id, mac.ea);
+        } else if (STR_EQ(type, OVSREC_INTERFACE_TYPE_INTERNAL)) {
+            bundle->l3_intf = \
+                    ops_xp_routing_enable_l3_vlan_interface(ofproto,
+                                                            vlan_id,
+                                                            bundle->name,
+                                                            mac.ea);
+        } else {
+            VLOG_ERR("%s: unknown interface type: %s", __FUNCTION__, type);
+        }
+    }
+}
+
 /* Host Functions */
 /* Function to unconfigure and free all port ip's */
 static void
@@ -1499,17 +1593,14 @@ port_unconfigure_ips(struct bundle_xpliant *bundle)
 
     /* Unconfigure primary ipv4 address and free */
     if (bundle->ip4addr) {
-        ops_xp_routing_delete_host_entry(ofproto, is_ipv6,
-                                         bundle->ip4addr->address,
-                                         &bundle->ip4addr->id);
+        ops_xp_routing_delete_host_entry(ofproto, &bundle->ip4addr->id);
         free(bundle->ip4addr->address);
         free(bundle->ip4addr);
     }
 
     /* Unconfigure secondary ipv4 address and free the hash */
     HMAP_FOR_EACH_SAFE (addr, next, addr_node, &bundle->secondary_ip4addr) {
-        ops_xp_routing_delete_host_entry(ofproto, is_ipv6, addr->address,
-                                         &addr->id);
+        ops_xp_routing_delete_host_entry(ofproto, &addr->id);
         hmap_remove(&bundle->secondary_ip4addr, &addr->addr_node);
         free(addr->address);
         free(addr);
@@ -1520,17 +1611,14 @@ port_unconfigure_ips(struct bundle_xpliant *bundle)
 
     /* Unconfigure primary ipv6 address and free */
     if (bundle->ip6addr) {
-        ops_xp_routing_delete_host_entry(ofproto, is_ipv6,
-                                         bundle->ip6addr->address,
-                                         &bundle->ip6addr->id);
+        ops_xp_routing_delete_host_entry(ofproto, &bundle->ip6addr->id);
         free(bundle->ip6addr->address);
         free(bundle->ip6addr);
     }
 
     /* Unconfigure secondary ipv6 address and free the hash */
     HMAP_FOR_EACH_SAFE (addr, next, addr_node, &bundle->secondary_ip6addr) {
-        ops_xp_routing_delete_host_entry(ofproto, is_ipv6, addr->address,
-                                         &bundle->ip6addr->id);
+        ops_xp_routing_delete_host_entry(ofproto, &bundle->ip6addr->id);
         hmap_remove(&bundle->secondary_ip6addr, &addr->addr_node);
         free(addr->address);
         free(addr);
@@ -1605,8 +1693,7 @@ port_config_secondary_ipv4_addr(struct ofproto_xpliant *ofproto,
     HMAP_FOR_EACH_SAFE (addr, next, addr_node, &bundle->secondary_ip4addr) {
         if (!shash_find_data(&new_ip_list, addr->address)) {
             hmap_remove(&bundle->secondary_ip4addr, &addr->addr_node);
-            ops_xp_routing_delete_host_entry(ofproto, is_ipv6, addr->address,
-                                             &addr->id);
+            ops_xp_routing_delete_host_entry(ofproto, &addr->id);
             free(addr->address);
             free(addr);
         }
@@ -1662,8 +1749,7 @@ port_config_secondary_ipv6_addr(struct ofproto_xpliant *ofproto,
     HMAP_FOR_EACH_SAFE (addr, next, addr_node, &bundle->secondary_ip6addr) {
         if (!shash_find_data(&new_ip6_list, addr->address)) {
             hmap_remove(&bundle->secondary_ip6addr, &addr->addr_node);
-            ops_xp_routing_delete_host_entry(ofproto, is_ipv6, addr->address,
-                                             &addr->id);
+            ops_xp_routing_delete_host_entry(ofproto, &addr->id);
             free(addr->address);
             free(addr);
         }
@@ -1705,8 +1791,7 @@ port_ip_reconfigure(struct ofproto_xpliant *ofproto,
             if (bundle->ip4addr) {
                 if (strcmp(bundle->ip4addr->address, s->ip4_address) != 0) {
                     /* If current and earlier are different, delete old */
-                    ops_xp_routing_delete_host_entry(ofproto, false,
-                                                     bundle->ip4addr->address,
+                    ops_xp_routing_delete_host_entry(ofproto,
                                                      &bundle->ip4addr->id);
                     free(bundle->ip4addr->address);
 
@@ -1730,9 +1815,7 @@ port_ip_reconfigure(struct ofproto_xpliant *ofproto,
         } else {
             /* Primary got removed, earlier if it was there then remove it */
             if (bundle->ip4addr != NULL) {
-                ops_xp_routing_delete_host_entry(ofproto, false,
-                                                 bundle->ip4addr->address,
-                                                 &bundle->ip4addr->id);
+                ops_xp_routing_delete_host_entry(ofproto, &bundle->ip4addr->id);
                 free(bundle->ip4addr->address);
                 free(bundle->ip4addr);
                 bundle->ip4addr = NULL;
@@ -1747,8 +1830,7 @@ port_ip_reconfigure(struct ofproto_xpliant *ofproto,
             if (bundle->ip6addr) {
                 if (strcmp(bundle->ip6addr->address, s->ip6_address) !=0) {
                     /* If current and earlier are different, delete old */
-                    ops_xp_routing_delete_host_entry(ofproto, true,
-                                                     bundle->ip6addr->address,
+                    ops_xp_routing_delete_host_entry(ofproto,
                                                      &bundle->ip6addr->id);
                     free(bundle->ip6addr->address);
 
@@ -1773,9 +1855,7 @@ port_ip_reconfigure(struct ofproto_xpliant *ofproto,
         } else {
             /* Primary got removed, earlier if it was there then remove it */
             if (bundle->ip6addr != NULL) {
-                ops_xp_routing_delete_host_entry(ofproto, true,
-                                                 bundle->ip6addr->address,
-                                                 &bundle->ip6addr->id);
+                ops_xp_routing_delete_host_entry(ofproto, &bundle->ip6addr->id);
                 free(bundle->ip6addr->address);
                 free(bundle->ip6addr);
                 bundle->ip6addr = NULL;
@@ -1817,8 +1897,6 @@ bundle_destroy(struct bundle_xpliant *bundle)
     port_unconfigure_ips(bundle);
 
     if (bundle->l3_intf) {
-        ops_xp_dev_remove_intf_entry(ofproto->xpdev,
-                                     bundle->l3_intf->l3_intf_id, 0);
         ops_xp_routing_disable_l3_interface(ofproto, bundle->l3_intf);
         bundle->l3_intf = NULL;
     }
@@ -1940,76 +2018,9 @@ ofproto_xpliant_bundle_set(struct ofproto *ofproto_, void *aux,
 
     VLOG_DBG("%s, ###### Bundle name: %s", __FUNCTION__, bundle->name);
 
-    /* for now, we don't support L3 on top of LAG */
-    if (ofproto->vrf && s->n_slaves == 1) {
-        struct ofport_xpliant *port;
-        xpsVlan_t vlan_id = 0;
-        const char *type = NULL;
-
-        port = get_ofp_port(bundle->ofproto, s->slaves[0]);
-        if (!port) {
-            VLOG_ERR("slave is not in the ports");
-        }
-
-        type = netdev_get_type(port->up.netdev);
-
-        /* For internal vlan interfaces, we get vlanid from tag column
-         * For regular l3 interfaces we will get from internal vlan id from
-         * hw_config column
-         */
-        if (STR_EQ(type, OVSREC_INTERFACE_TYPE_INTERNAL)) {
-            vlan_id = s->vlan;
-        } else if (STR_EQ(type, OVSREC_INTERFACE_TYPE_VLANSUBINT)) {
-            ops_xp_netdev_get_subintf_vlan(port->up.netdev, &vlan_id);
-        } else {
-            vlan_id = smap_get_int(s->port_options[PORT_HW_CONFIG],
-                                   "internal_vlan_id", 0);
-        }
-
-        if (bundle->l3_intf) {
-            /* if reserved vlan changed/removed or if port status is disabled */
-            if (bundle->l3_intf->vlan_id != vlan_id || !s->enable) {
-                ops_xp_routing_disable_l3_interface(ofproto, bundle->l3_intf);
-                bundle->l3_intf = NULL;
-            }
-        }
-
-        if (vlan_id && !bundle->l3_intf && s->enable) {
-            struct eth_addr mac;
-
-            netdev_get_etheraddr(port->up.netdev, &mac);
-
-            VLOG_INFO("%s: NETDEV %s, MAC "ETH_ADDR_FMT" VLAN %u, rc %d",
-                      __FUNCTION__, netdev_get_name(port->up.netdev),
-                      ETH_ADDR_ARGS(mac), vlan_id, ret_val);
-
-            if (STR_EQ(type, OVSREC_INTERFACE_TYPE_SYSTEM)) {
-                bundle->intfId = ops_xp_get_ofport_intf_id(port);
-                bundle->l3_intf = \
-                        ops_xp_routing_enable_l3_interface(ofproto,
-                                                           bundle->intfId,
-                                                           vlan_id, mac.ea);
-                /* TODO: Check whether the default VLAN is not set by
-                 * xpsVlanAddInterface() inside xp_routing_enable_l3_interface()
-                 */
-                ops_xp_port_default_vlan_set(ofproto->xpdev->id,
-                                             ops_xp_get_ofport_number(port),
-                                             vlan_id);
-            } else if (STR_EQ(type, OVSREC_INTERFACE_TYPE_VLANSUBINT)) {
-                bundle->intfId = ops_xp_get_ofport_intf_id(port);
-                bundle->l3_intf = \
-                        ops_xp_routing_enable_l3_subinterface(ofproto,
-                                                              bundle->intfId,
-                                                              vlan_id, mac.ea);
-            } else if (STR_EQ(type, OVSREC_INTERFACE_TYPE_INTERNAL)) {
-                bundle->l3_intf = \
-                        ops_xp_routing_enable_l3_vlan_interface(ofproto,
-                                                                vlan_id,
-                                                                mac.ea);
-            } else {
-                VLOG_ERR("%s: unknown interface type: %s", __FUNCTION__, type);
-            }
-        }
+    /* Handle L3 configuration. */
+    if (ofproto->vrf && (s->n_slaves > 0)) {
+        bundle_update_l3_config(ofproto, bundle, s);
     }
 
     /* Check for ip changes */
@@ -2062,12 +2073,6 @@ ofproto_xpliant_bundle_set(struct ofproto *ofproto_, void *aux,
             bundle_update_vlan_config(ofproto, bundle, s);
 
             ops_xp_dev_add_intf_entry(ofproto->xpdev, bundle->intfId,
-                                      bundle->name, 0);
-        }
-    } else {
-        if (bundle->l3_intf) {
-            ops_xp_dev_add_intf_entry(ofproto->xpdev,
-                                      bundle->l3_intf->l3_intf_id,
                                       bundle->name, 0);
         }
     }
@@ -2274,8 +2279,7 @@ ofproto_xpliant_delete_l3_host_entry(const struct ofproto *ofproto_, void *aux,
         return EPERM; /* Return error */
     }
 
-    error = ops_xp_routing_delete_host_entry(ofproto, is_ipv6_addr,
-                                             ip_addr, l3_egress_id);
+    error = ops_xp_routing_delete_host_entry(ofproto, l3_egress_id);
     if (error) {
         VLOG_ERR("Failed to delete L3 host entry for ip %s", ip_addr);
     }

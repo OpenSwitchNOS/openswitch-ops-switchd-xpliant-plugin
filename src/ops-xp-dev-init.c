@@ -53,9 +53,11 @@ static xpsDevConfigStruct_t defaultConfig = {
     XP_ROUTE_CENTRIC_SINGLE_PIPE_PROFILE,     // SELECT PROFILE
     SKU_128X10,                               // default speed
 #ifdef OPS_XP_SIM
-    XPS_DAL_WHITEMODEL
+    XPS_DAL_WHITEMODEL,
+    1,
 #else
-    XPS_DAL_HARDWARE
+    XPS_DAL_HARDWARE,
+    0
 #endif
 };
 

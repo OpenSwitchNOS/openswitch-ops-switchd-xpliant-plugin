@@ -48,6 +48,7 @@ struct xp_port_info {
     xpsPort_t port_num;             /* Device port number */
     bool hw_enable;
     bool serdes_tuned;
+    bool initialized;
 
     /* ------- Subport/lane split config (e.g. QSFP+) -------
      * Subport count & lane split status. These are valid for

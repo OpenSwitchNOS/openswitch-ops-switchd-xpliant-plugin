@@ -58,6 +58,11 @@ typedef struct {
     bool kickout;               /* Force test to stop */
 } xp_l3_dbg_t;
 
+static void
+route_delete(struct ofproto_xpliant *ofproto, xp_route_entry_t *route);
+
+static void
+nh_group_delete(struct ofproto_xpliant *ofproto, xp_nh_group_entry_t *nh_group);
 
 
 /* Creates and returns a new L3 manager. */
@@ -98,21 +103,37 @@ ops_xp_l3_mgr_create(xpsDevice_t devId)
  * Should be called directly only on program exit where immediate destruction is
  * required, otherwise xp_l3_mgr_unref() should be used. */
 void
-ops_xp_l3_mgr_destroy(xp_l3_mgr_t *mgr)
+ops_xp_l3_mgr_destroy(struct ofproto_xpliant *ofproto)
 {
-    if (mgr == NULL) {
+    xp_l3_mgr_t *mgr;
+    xp_l3_dbg_t *dbg;
+    uint32_t i;
+
+    ovs_assert(ofproto);
+
+    if (ofproto->l3_mgr == NULL) {
         return;
     }
 
-    /* Clear and destroy hosts map. */
+    mgr = ofproto->l3_mgr;
+    dbg = mgr->dbg;
+
+    /* Remove L3 debugging info */
+    i = 3;
+    dbg->kickout = true;
+    while (dbg->started && (i > 0)) {
+        sleep(1);
+        --i;
+    }
+    free(dbg);
+
+    /* Remove dummy/empty host entries */
     {
         xp_host_entry_t *e = NULL;
-        xp_host_entry_t *next = NULL;
 
-        HMAP_FOR_EACH_SAFE (e, next, hmap_node, &mgr->host_map) {
-//            xp_l3_mgr_remove_host(mgr, e->host);
+        LIST_FOR_EACH_POP (e, list_node, &mgr->dummy_host_list) {
+            free(e);
         }
-        hmap_destroy(&mgr->host_map);
     }
 
     /* Clear and destroy routes map. */
@@ -121,9 +142,32 @@ ops_xp_l3_mgr_destroy(xp_l3_mgr_t *mgr)
         xp_route_entry_t *next = NULL;
 
         HMAP_FOR_EACH_SAFE (e, next, hmap_node, &mgr->route_map) {
-//            xp_l3_mgr_remove_route(mgr, e->net, e->mask);
+            route_delete(ofproto, e);
         }
         hmap_destroy(&mgr->route_map);
+    }
+
+    /* Clear and destroy NH group map. */
+    {
+        xp_nh_group_entry_t *e = NULL;
+        xp_nh_group_entry_t *next = NULL;
+
+        HMAP_FOR_EACH_SAFE (e, next, hmap_node, &mgr->nh_group_map) {
+            nh_group_delete(ofproto, e);
+        }
+        hmap_destroy(&mgr->nh_group_map);
+    }
+
+    /* Clear and destroy hosts map. */
+    {
+        xp_host_entry_t *e = NULL;
+        xp_host_entry_t *next = NULL;
+
+        HMAP_FOR_EACH_SAFE (e, next, hmap_node, &mgr->host_map) {
+            ops_xp_routing_delete_host_entry(ofproto, &e->id);
+        }
+        hmap_destroy(&mgr->host_map);
+        hmap_destroy(&mgr->host_id_map);
     }
 
     ovs_mutex_destroy(&mgr->mutex);
@@ -144,12 +188,12 @@ ops_xp_l3_mgr_ref(xp_l3_mgr_t *mgr)
 
 /* Unreferences (and possibly destroys) L3 manager */
 void
-ops_xp_l3_mgr_unref(xp_l3_mgr_t *mgr)
+ops_xp_l3_mgr_unref(struct ofproto_xpliant *ofproto)
 {
     int ret = 0;
 
-    if (mgr && ovs_refcount_unref(&mgr->ref_cnt) == 1) {
-        ops_xp_l3_mgr_destroy(mgr);
+    if (ofproto->l3_mgr && ovs_refcount_unref(&ofproto->l3_mgr->ref_cnt) == 1) {
+        ops_xp_l3_mgr_destroy(ofproto);
     }
 }
 
@@ -160,7 +204,6 @@ host_entry_alloc(xp_l3_mgr_t *mgr)
     struct ovs_list *node;
 
     ovs_assert(mgr);
-    ovs_mutex_lock(&mgr->mutex);
     if (list_is_empty(&mgr->dummy_host_list)) {
         host = xzalloc(sizeof *host);
         host->id = mgr->next_host_id++;
@@ -168,7 +211,6 @@ host_entry_alloc(xp_l3_mgr_t *mgr)
         node = list_pop_front(&mgr->dummy_host_list);
         host = CONTAINER_OF(node, xp_host_entry_t, list_node);
     }
-    ovs_mutex_unlock(&mgr->mutex);
     return host;
 }
 
@@ -181,10 +223,7 @@ host_entry_free(xp_l3_mgr_t *mgr, xp_host_entry_t *host)
         uint32_t id = host->id;
         memset(host, 0, sizeof(*host));
         host->id = id;
-
-        ovs_mutex_lock(&mgr->mutex);
         list_push_front(&mgr->dummy_host_list, &host->list_node);
-        ovs_mutex_unlock(&mgr->mutex);
     }
 }
 
@@ -208,12 +247,14 @@ ops_xp_routing_add_host_entry(struct ofproto_xpliant *ofproto,
     ovs_assert(ofproto->xpdev);
     ovs_assert(ofproto->l3_mgr);
 
-    VLOG_INFO("%s: %s ip %s, mac %s, port %u, l3intf %u",
-              __FUNCTION__, local ? "local" : "remote",
-              ip_addr, next_hop_mac_addr,
-              port_intf_id, l3_intf_id);
+    VLOG_DBG("%s: %s ip %s, mac %s, port %u, l3intf %u",
+             __FUNCTION__, local ? "local" : "remote",
+             ip_addr, next_hop_mac_addr,
+             port_intf_id, l3_intf_id);
 
     l3_mgr = ofproto->l3_mgr;
+
+    ovs_mutex_lock(&l3_mgr->mutex);
 
     e = host_entry_alloc(l3_mgr);
 
@@ -245,7 +286,8 @@ ops_xp_routing_add_host_entry(struct ofproto_xpliant *ofproto,
             VLOG_ERR("Failed to create L3 host entry. Invalid ipv6 address %s",
                      ip_addr);
             host_entry_free(l3_mgr, e);
-            return EFAULT;
+            ovs_mutex_unlock(&l3_mgr->mutex);
+            return EPFNOSUPPORT;
         }
         e->xp_host.type = XP_PREFIX_TYPE_IPV6;
         memcpy(e->xp_host.ipv6Addr, &ipv6_addr, sizeof(struct in6_addr));
@@ -258,7 +300,8 @@ ops_xp_routing_add_host_entry(struct ofproto_xpliant *ofproto,
             VLOG_ERR("Failed to create L3 host entry. Invalid ipv4 address %s",
                      ip_addr);
             host_entry_free(l3_mgr, e);
-            return EFAULT;
+            ovs_mutex_unlock(&l3_mgr->mutex);
+            return EPFNOSUPPORT;
         }
 
         e->xp_host.type = XP_PREFIX_TYPE_IPV4;
@@ -280,18 +323,17 @@ ops_xp_routing_add_host_entry(struct ofproto_xpliant *ofproto,
         VLOG_ERR("%s, Could not add L3 host entry on hardware. Error: %d",
                  __FUNCTION__, status);
         host_entry_free(l3_mgr, e);
-        return EFAULT;
+        ovs_mutex_unlock(&l3_mgr->mutex);
+        return EAGAIN;
     }
 
     /* Assign unique immutable Host Entry ID */
     *l3_egress_id = (int)e->id;
 
-    ovs_mutex_lock(&l3_mgr->mutex);
-
-    VLOG_INFO("%s: Entry Id %u: "IP_FMT"  "ETH_ADDR_FMT,
-              __FUNCTION__, *l3_egress_id,
-              IP_ARGS(e->ipv4_dest_addr.s_addr),
-              ETH_ADDR_BYTES_ARGS(e->xp_host.nhEntry.nextHop.macDa));
+    VLOG_DBG("%s: Entry Id %u: "IP_FMT"  "ETH_ADDR_FMT,
+             __FUNCTION__, *l3_egress_id,
+             IP_ARGS(e->ipv4_dest_addr.s_addr),
+             ETH_ADDR_BYTES_ARGS(e->xp_host.nhEntry.nextHop.macDa));
 
     if (hash != rehash) {
         struct hmap_node *node;
@@ -313,7 +355,6 @@ ops_xp_routing_add_host_entry(struct ofproto_xpliant *ofproto,
 
 int
 ops_xp_routing_delete_host_entry(struct ofproto_xpliant *ofproto,
-                                 bool is_ipv6_addr, char *ip_addr,
                                  int *l3_egress_id)
 {
     XP_STATUS status;
@@ -328,6 +369,7 @@ ops_xp_routing_delete_host_entry(struct ofproto_xpliant *ofproto,
     ovs_assert(ofproto->l3_mgr);
 
     l3_mgr = ofproto->l3_mgr;
+
     ovs_mutex_lock(&l3_mgr->mutex);
 
     node = hmap_first_with_hash(&l3_mgr->host_id_map, (size_t)*l3_egress_id);
@@ -345,19 +387,19 @@ ops_xp_routing_delete_host_entry(struct ofproto_xpliant *ofproto,
         hmap_remove(&l3_mgr->host_map, &e->hmap_node);
     }
 
-    ovs_mutex_unlock(&l3_mgr->mutex);
+    memset(&host_entry, 0, sizeof(host_entry));
+    host_entry.type = e->is_ipv6_addr ? XP_PREFIX_TYPE_IPV6 : XP_PREFIX_TYPE_IPV4;
 
     host_entry_free(l3_mgr, e);
 
     /* Remove Host Entry from the HW */
-    memset(&host_entry, 0, sizeof(host_entry));
-    host_entry.type = is_ipv6_addr ? XP_PREFIX_TYPE_IPV6 : XP_PREFIX_TYPE_IPV4;
-
     status = xpsL3RemoveIpHostEntryByIndex(ofproto->xpdev->id, (uint32_t)index,
                                            &host_entry);
+    ovs_mutex_unlock(&l3_mgr->mutex);
+
     if (status != XP_NO_ERR) {
         VLOG_ERR("Failed to delete L3 host entry");
-        return EFAULT;
+        return EHOSTDOWN;
     }
 
     return 0;
@@ -367,15 +409,26 @@ static xp_nh_group_entry_t *
 nh_group_alloc(uint32_t size)
 {
     xp_nh_group_entry_t *nh_group;
+    XP_STATUS status;
+    uint32_t nh_id;
 
     if (size > OFPROTO_MAX_NH_PER_ROUTE) {
         return NULL;
     }
 
+    /* Allocate new NH group ID */
+    status = xpsL3CreateRouteNextHop(size, &nh_id);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Could not allocate NH on hardware. Err %d", status);
+        return NULL;
+    }
+
+    /* Allocate and init NH group entry */
     nh_group = xzalloc(sizeof(*nh_group));
     hmap_init(&nh_group->nh_map);
     ovs_refcount_init(&nh_group->ref_cnt);
     nh_group->size = size;
+    nh_group->nh_id = nh_id;
 
     if (size > 0) {
         hmap_reserve(&nh_group->nh_map, size);
@@ -387,22 +440,22 @@ nh_group_alloc(uint32_t size)
 static void
 nh_group_free(xp_nh_group_entry_t *nh_group)
 {
+    XP_STATUS status;
     xp_nh_entry_t *e = NULL;
     xp_nh_entry_t *next = NULL;
-    XP_STATUS status;
 
     ovs_assert(nh_group);
 
-    VLOG_INFO("%s: nexthop id %u, size %u",
-              __FUNCTION__, nh_group->nh_id, nh_group->size);
+    VLOG_DBG("%s: nexthop id %u, size %u",
+             __FUNCTION__, nh_group->nh_id, nh_group->size);
 
     status = xpsL3DestroyRouteNextHop(nh_group->size, nh_group->nh_id);
     if (status != XP_NO_ERR) {
-        VLOG_ERR("Could not remove next hop on hardware. Err %d", status);
+        VLOG_WARN("Could not remove next hop on hardware. Err %d", status);
     }
 
     HMAP_FOR_EACH_SAFE(e, next, hmap_node, &nh_group->nh_map) {
-        VLOG_INFO("%s: nexthop %s", __FUNCTION__, e->id);
+        VLOG_DBG("%s: nexthop %s", __FUNCTION__, e->id);
         free(e->id);
         free(e);
     }
@@ -411,17 +464,39 @@ nh_group_free(xp_nh_group_entry_t *nh_group)
 }
 
 static void
-nh_group_unref(xp_l3_mgr_t *mgr, xp_nh_group_entry_t *nh_group)
+nh_group_delete(struct ofproto_xpliant *ofproto, xp_nh_group_entry_t *nh_group)
 {
-    ovs_assert(mgr);
+    XP_STATUS status;
+    xp_nh_entry_t *e;
 
+    ovs_assert(ofproto);
+    ovs_assert(ofproto->l3_mgr);
+    ovs_assert(nh_group);
+
+    VLOG_DBG("%s: nexthop id %u, size %u",
+             __FUNCTION__, nh_group->nh_id, nh_group->size);
+
+    if (hmap_contains(&ofproto->l3_mgr->nh_group_map,
+                      &nh_group->hmap_node)) {
+        hmap_remove(&ofproto->l3_mgr->nh_group_map, &nh_group->hmap_node);
+    }
+
+    HMAP_FOR_EACH(e, hmap_node, &nh_group->nh_map) {
+        status = xpsL3ClearRouteNextHop(ofproto->xpdev->id, e->xp_nh_id);
+        if (status != XP_NO_ERR) {
+            VLOG_WARN("Could not clear NH on hardware. Status: %d", status);
+        }
+    }
+
+    nh_group_free(nh_group);
+}
+
+static void
+nh_group_unref(struct ofproto_xpliant *ofproto, xp_nh_group_entry_t *nh_group)
+{
     if (nh_group) {
         if (ovs_refcount_unref(&nh_group->ref_cnt) == 1) {
-            ovs_mutex_lock(&mgr->mutex);
-            hmap_remove(&mgr->nh_group_map, &nh_group->hmap_node);
-            ovs_mutex_unlock(&mgr->mutex);
-
-            nh_group_free(nh_group);
+            nh_group_delete(ofproto, nh_group);
         }
     }
 }
@@ -441,15 +516,12 @@ nh_group_add(struct ofproto_xpliant *ofproto, xp_nh_group_entry_t *nh_group)
         status = xpsL3SetRouteNextHop(ofproto->xpdev->id, e->xp_nh_id, &e->xp_nh);
         if (status != XP_NO_ERR) {
             VLOG_ERR("Could not set next hop on hardware. Status: %d", status);
-            return EFAULT;
+            return EHOSTUNREACH;
         }
     }
 
-    ovs_mutex_lock(&ofproto->l3_mgr->mutex);
     hmap_insert(&ofproto->l3_mgr->nh_group_map,
                 &nh_group->hmap_node, nh_group->hash);
-    ovs_mutex_unlock(&ofproto->l3_mgr->mutex);
-
     return 0;
 }
 
@@ -481,9 +553,9 @@ nh_insert(xp_nh_group_entry_t *nh_group, xp_nh_entry_t *nh)
         nh_group->size = hmap_count(&nh_group->nh_map);
     }
 
-    VLOG_INFO("%s: nexthop group id %u, size %u, hash %08X, nh %s, nh id %u",
-              __FUNCTION__, nh_group->nh_id, nh_group->size,
-              nh_group->hash, nh->id, nh->xp_nh_id);
+    VLOG_DBG("%s: nexthop group id %u, size %u, hash %08X, nh %s, nh id %u",
+             __FUNCTION__, nh_group->nh_id, nh_group->size,
+             nh_group->hash, nh->id, nh->xp_nh_id);
 }
 
 static int
@@ -500,12 +572,10 @@ nh_update(xp_l3_mgr_t *mgr, xp_nh_entry_t *xp_nh,
         xp_host_entry_t *host_entry;
 
         /* Retrieve L3 Host Entry */
-        ovs_mutex_lock(&mgr->mutex);
         node = hmap_first_with_hash(&mgr->host_id_map, (size_t)nh->l3_egress_id);
         if (node == NULL) {
-            ovs_mutex_unlock(&mgr->mutex);
             VLOG_WARN("Unknown L3 host entry ID %d", nh->l3_egress_id);
-            return EFAULT;
+            return EHOSTUNREACH;
         }
         host_entry = CONTAINER_OF(node, xp_host_entry_t, hmap_id_node);
 
@@ -516,9 +586,8 @@ nh_update(xp_l3_mgr_t *mgr, xp_nh_entry_t *xp_nh,
         xp_nh->xp_nh.nextHop.egressIntfId = host_entry->xp_host.nhEntry.nextHop.egressIntfId;
         xp_nh->xp_nh.nextHop.l3InterfaceId = host_entry->xp_host.nhEntry.nextHop.l3InterfaceId;
         xp_nh->xp_nh.serviceInstId = host_entry->xp_host.nhEntry.serviceInstId;
-        ovs_mutex_unlock(&mgr->mutex);
-
         xp_nh->xp_nh.pktCmd = XP_PKTCMD_FWD;
+
     } else if (xp_nh->xp_nh.pktCmd != XP_PKTCMD_FWD) {
         /* Entry is not resolved. Trap packet to CPU for resolution. */
         xp_nh->xp_nh.pktCmd = XP_PKTCMD_TRAP;
@@ -583,15 +652,15 @@ nh_group_lookup_by_route(xp_l3_mgr_t *mgr, struct ofproto_route *route)
 
     for (i = 0, hash = 0; i < route->n_nexthops; i++) {
         hash = hash_string(route->nexthops[i].id, hash);
-        VLOG_INFO("%s: nexthop %s, type %u, state %u",
-                  __FUNCTION__, route->nexthops[i].id,
-                  route->nexthops[i].type, route->nexthops[i].state);
+        VLOG_DBG("%s: nexthop %s, type %u, state %u",
+                 __FUNCTION__, route->nexthops[i].id,
+                 route->nexthops[i].type, route->nexthops[i].state);
     }
 
     HMAP_FOR_EACH_WITH_HASH(e, hmap_node, hash, &mgr->nh_group_map) {
         if (e->size == route->n_nexthops) {
-            VLOG_INFO("%s: nexthop group id %u, size %u",
-                      __FUNCTION__, e->nh_id, e->size);
+            VLOG_DBG("%s: nexthop group id %u, size %u",
+                     __FUNCTION__, e->nh_id, e->size);
 
             found = true;
             for (i = 0; i < route->n_nexthops; i++) {
@@ -607,6 +676,7 @@ nh_group_lookup_by_route(xp_l3_mgr_t *mgr, struct ofproto_route *route)
             }
         }
     }
+
     return NULL;
 }
 
@@ -636,6 +706,7 @@ nh_group_lookup_by_group(xp_l3_mgr_t *mgr, xp_nh_group_entry_t *nh_group)
             }
         }
     }
+
     return NULL;
 }
 
@@ -650,15 +721,14 @@ route_update(struct ofproto_xpliant *ofproto,
     XP_STATUS status;
     int rc;
     xp_nh_group_entry_t *nh_group;
-    uint32_t nh_id;
     uint32_t n_nexthops;
 
-    VLOG_INFO("%s: %s", __FUNCTION__, route->prefix);
+    VLOG_DBG("%s: %s", __FUNCTION__, route->prefix);
 
     for (i = 0; i < route->n_nexthops; i++) {
-        VLOG_INFO("%s: nexthop %s, type %u, state %u",
-                  __FUNCTION__, route->nexthops[i].id,
-                  route->nexthops[i].type, route->nexthops[i].state);
+        VLOG_DBG("%s: nexthop %s, type %u, state %u",
+                 __FUNCTION__, route->nexthops[i].id,
+                 route->nexthops[i].type, route->nexthops[i].state);
     }
 
     /* Check whether new NH entries have to be added */
@@ -671,32 +741,23 @@ route_update(struct ofproto_xpliant *ofproto,
         }
     }
 
-    /* Create new NH group if new NH entries have to be added */
     if (nh_add) {
+        /* New NH entries have to be added to the NH group of the route.
+         * Since NH group can already be referenced by a few other routes
+         * then new NH group has to be created for this route. */
+
+        /* Calculate NH group size */
         n_nexthops = route->n_nexthops;
         if (xp_route->nh_group) {
             n_nexthops += xp_route->nh_group->size;
         }
 
-        /* Allocate new NH group ID */
-        status = xpsL3CreateRouteNextHop(n_nexthops, &nh_id);
-        if (status != XP_NO_ERR) {
-            VLOG_ERR("Could not create next hop on hardware. Err %d", status);
-            return EFAULT;
-        }
-
-        /* Allocate NH group */
+        /* Allocate new NH group */
         nh_group = nh_group_alloc(n_nexthops);
         if (nh_group == NULL) {
             VLOG_ERR("Failed to allocate NH group");
-            status = xpsL3DestroyRouteNextHop(n_nexthops, nh_id);
-            if (status != XP_NO_ERR) {
-                VLOG_ERR("Could not remove next hop on hardware. Err %d",
-                         status);
-            }
-            return EFAULT;
+            return ENOMEM;
         }
-        nh_group->nh_id = nh_id;
 
         /* Copy existing NH into the new NH group */
         if (xp_route->nh_group) {
@@ -705,6 +766,9 @@ route_update(struct ofproto_xpliant *ofproto,
             }
         }
     } else {
+        /* Existing NH group should be updated.
+         * NOTE: the update will be visible for all routes that
+         * refer to this NH group. */
         nh_group = xp_route->nh_group;
     }
 
@@ -712,43 +776,60 @@ route_update(struct ofproto_xpliant *ofproto,
     for (i = 0; i < route->n_nexthops; i++) {
         nh = nh_lookup(nh_group, route->nexthops[i].id);
         if (nh == NULL) {
-            VLOG_INFO("%s: Create nexthop %s, type %u, state %u",
-                      __FUNCTION__, route->nexthops[i].id,
-                      route->nexthops[i].type, route->nexthops[i].state);
+            VLOG_DBG("%s: create nexthop %s, type %u, state %u",
+                     __FUNCTION__, route->nexthops[i].id,
+                     route->nexthops[i].type, route->nexthops[i].state);
 
             /* Add new NH entry */
             nh = nh_create(ofproto->l3_mgr, &route->nexthops[i]);
             if (nh == NULL) {
                 VLOG_ERR("Failed to create NH entry %s",
                          route->nexthops[i].id);
+                /* The NH group has not been created on HW yet.
+                 * So, just free resources. */
                 nh_group_free(nh_group);
-                return EFAULT;
+                return EHOSTUNREACH;
             }
             nh_insert(nh_group, nh);
         } else {
-            VLOG_INFO("%s: Update nexthop %s, type %u, state %u",
-                      __FUNCTION__, route->nexthops[i].id,
-                      route->nexthops[i].type, route->nexthops[i].state);
+            VLOG_DBG("%s: update nexthop %s, type %u, state %u",
+                     __FUNCTION__, route->nexthops[i].id,
+                     route->nexthops[i].type, route->nexthops[i].state);
 
             /* Update existing NH entry */
             rc = nh_update(ofproto->l3_mgr, nh, &route->nexthops[i]);
             if (rc) {
                 VLOG_ERR("Failed to update NH entry %s", route->nexthops[i].id);
                 if (nh_add) {
+                    /* In case NH group has not been created on HW yet,
+                     * just free it. */
                     nh_group_free(nh_group);
                 }
-                return EFAULT;
+                return rc;
             }
         }
     }
 
     if (nh_add) {
-        /* Create NH group on hardware */
-        rc = nh_group_add(ofproto, nh_group);
-        if (rc) {
-            VLOG_ERR("Failed to add next hop group");
+        xp_nh_group_entry_t *old_nh_group;
+
+        old_nh_group = nh_group_lookup_by_group(ofproto->l3_mgr, nh_group);
+        if (old_nh_group) {
+            /* Reuse existing NH group */
             nh_group_free(nh_group);
-            return rc;
+            nh_group = old_nh_group;
+            VLOG_DBG("%s: reuse existing NH group %u",
+                     __FUNCTION__, nh_group->nh_id);
+        } else {
+            /* Create NH group on hardware */
+            rc = nh_group_add(ofproto, nh_group);
+            if (rc) {
+                VLOG_ERR("Failed to add next hop group");
+                nh_group_delete(ofproto, nh_group);
+                return rc;
+            }
+            VLOG_DBG("%s: create new NH group %u",
+                     __FUNCTION__, nh_group->nh_id);
         }
 
         /* Update route entry */
@@ -759,10 +840,10 @@ route_update(struct ofproto_xpliant *ofproto,
                                          &xp_route->xp_route);
         if (status) {
             VLOG_ERR("Could not update route on hardware. Err %d", status);
-            nh_group_free(nh_group);
-            return EPERM;
+            nh_group_delete(ofproto, nh_group);
+            return EACCES;
         }
-        nh_group_unref(ofproto->l3_mgr, xp_route->nh_group);
+        nh_group_unref(ofproto, xp_route->nh_group);
         xp_route->nh_group = nh_group;
 
     } else {
@@ -772,7 +853,7 @@ route_update(struct ofproto_xpliant *ofproto,
                                           nh->xp_nh_id, &nh->xp_nh);
             if (status != XP_NO_ERR) {
                 VLOG_ERR("Could not set next hop on hardware. Err %d", status);
-                return EFAULT;
+                return EACCES;
             }
         }
     }
@@ -790,48 +871,36 @@ route_add(struct ofproto_xpliant *ofproto, struct ofproto_route *route)
     xp_l3_mgr_t *mgr;
     xp_route_entry_t *e;
     xp_nh_entry_t *nh;
-    uint32_t nh_id;
     XP_STATUS status;
     uint32_t i;
     int rc;
 
     mgr = ofproto->l3_mgr;
 
-    VLOG_INFO("%s: %s", __FUNCTION__, route->prefix);
+    VLOG_DBG("%s: %s", __FUNCTION__, route->prefix);
 
     /* Create new NH group or get reference to the existing NH group */
     nh_group = nh_group_lookup_by_route(mgr, route);
     if (nh_group == NULL) {
-        VLOG_INFO("%s: allocate new nexthop group for route %s",
-                  __FUNCTION__, route->prefix);
-
-        /* Allocate new NH group ID */
-        status = xpsL3CreateRouteNextHop(route->n_nexthops, &nh_id);
-        if (status != XP_NO_ERR) {
-            VLOG_ERR("Could not create next hop on hardware. Err %d", status);
-            return EFAULT;
-        }
+        VLOG_DBG("%s: allocate new nexthop group for route %s",
+                 __FUNCTION__, route->prefix);
 
         /* Allocate NH group */
         nh_group = nh_group_alloc(route->n_nexthops);
         if (nh_group == NULL) {
             VLOG_ERR("Failed to allocate NH group");
-            status = xpsL3DestroyRouteNextHop(route->n_nexthops, nh_id);
-            if (status != XP_NO_ERR) {
-                VLOG_ERR("Could not remove next hop on hardware. Err %d",
-                         status);
-            }
-            return EFAULT;
+            return ENOMEM;
         }
-        nh_group->nh_id = nh_id;
 
         /* Initialize NH group with NH entries */
         for (i = 0; i < route->n_nexthops; i++) {
             nh = nh_create(mgr, &route->nexthops[i]);
             if (nh == NULL) {
                 VLOG_ERR("Failed to create NH entry %s", route->nexthops[i].id);
+                /* The NH group has not been created on HW yet.
+                 * So, just free resources. */
                 nh_group_free(nh_group);
-                return EFAULT;
+                return EHOSTUNREACH;
             }
             nh_insert(nh_group, nh);
         }
@@ -840,13 +909,14 @@ route_add(struct ofproto_xpliant *ofproto, struct ofproto_route *route)
         rc = nh_group_add(ofproto, nh_group);
         if (rc) {
             VLOG_ERR("Failed to add next hop group");
-            nh_group_free(nh_group);
+            nh_group_delete(ofproto, nh_group);
             return rc;
         }
     }
 
     /* Allocate and initialize new route entry */
     e = xzalloc(sizeof *e);
+    ovs_refcount_init(&e->ref_cnt);
 
     if (route->family == OFPROTO_ROUTE_IPV4) {
         in_addr_t ipv4_addr;
@@ -855,9 +925,9 @@ route_add(struct ofproto_xpliant *ofproto, struct ofproto_route *route)
                                      &prefix_len);
         if (rc) {
             VLOG_ERR("Invalid IPv4/Prefix");
-            nh_group_unref(mgr, nh_group);
+            nh_group_unref(ofproto, nh_group);
             free(e);
-            return rc;
+            return EPFNOSUPPORT;
         }
 
         e->xp_route.type = XP_PREFIX_TYPE_IPV4;
@@ -870,9 +940,9 @@ route_add(struct ofproto_xpliant *ofproto, struct ofproto_route *route)
                                      &prefix_len);
         if (rc) {
             VLOG_ERR("Invalid IPv6/Prefix");
-            nh_group_unref(mgr, nh_group);
+            nh_group_unref(ofproto, nh_group);
             free(e);
-            return rc;
+            return EPFNOSUPPORT;
         }
         e->xp_route.type = XP_PREFIX_TYPE_IPV6;
         memcpy(e->xp_route.ipv6Addr, &ipv6_addr, 16);
@@ -887,21 +957,18 @@ route_add(struct ofproto_xpliant *ofproto, struct ofproto_route *route)
     status = xpsL3AddIpRouteEntry(ofproto->xpdev->id, &e->xp_route,
                                   &route_index);
     if (status) {
-        VLOG_WARN("Could not add route to hardware. Error: %d", status);
-        nh_group_unref(mgr, e->nh_group);
+        VLOG_ERR("Could not add route to hardware. Error: %d", status);
+        nh_group_unref(ofproto, e->nh_group);
         free(e);
-        return EPERM;
+        return EAGAIN;
     }
 
     e->prefix = xstrdup(route->prefix);
-
     hash = hash_string(route->prefix, 0);
-
-    ovs_mutex_lock(&mgr->mutex);
     hmap_insert(&mgr->route_map, &e->hmap_node, hash);
-    ovs_mutex_unlock(&mgr->mutex);
-    VLOG_INFO("%s: RIB size %u. Added route %s",
-              __FUNCTION__, hmap_count(&mgr->route_map), route->prefix);
+
+    VLOG_DBG("%s: RIB size %u. Added route %s",
+             __FUNCTION__, hmap_count(&mgr->route_map), route->prefix);
     return 0;
 }
 
@@ -915,41 +982,74 @@ route_lookup(xp_l3_mgr_t *mgr, const char *prefix)
     ovs_assert(prefix);
 
     hash = hash_string(prefix, 0);
-    VLOG_INFO("%s: Search for route %s with hash %08X",
-              __FUNCTION__, prefix, hash);
+    VLOG_DBG("%s: Search for route %s with hash %08X",
+             __FUNCTION__, prefix, hash);
 
     HMAP_FOR_EACH_WITH_HASH(e, hmap_node, hash, &mgr->route_map) {
         if (strcmp(e->prefix, prefix) == 0) {
+            ovs_refcount_ref(&e->ref_cnt);
             return e;
         }
     }
+
     return NULL;
+}
+
+static void
+route_delete(struct ofproto_xpliant *ofproto, xp_route_entry_t *route)
+{
+    xp_l3_mgr_t *mgr;
+    XP_STATUS status;
+
+    ovs_assert(ofproto);
+    ovs_assert(ofproto->l3_mgr);
+    ovs_assert(route);
+
+    mgr = ofproto->l3_mgr;
+
+    hmap_remove(&mgr->route_map, &route->hmap_node);
+
+    VLOG_DBG("%s: RIB size %u. Removed route %s",
+             __FUNCTION__, hmap_count(&mgr->route_map), route->prefix);
+
+    status = xpsL3RemoveIpRouteEntry(ofproto->xpdev->id, &route->xp_route);
+    if (status != XP_NO_ERR) {
+        VLOG_WARN("Failed to remove route from hardware. Err %d", status);
+    }
+
+    nh_group_unref(ofproto, route->nh_group);
+    free(route->prefix);
+    free(route);
+}
+
+static void
+route_unref(struct ofproto_xpliant *ofproto, xp_route_entry_t *route)
+{
+    ovs_assert(route);
+    if (ovs_refcount_unref(&route->ref_cnt) == 1) {
+        route_delete(ofproto, route);
+    }
 }
 
 static int
 add_route_entry(struct ofproto_xpliant *ofproto, struct ofproto_route *route)
 {
     xp_route_entry_t *e;
-    xp_l3_mgr_t *mgr;
     int rc;
 
     ovs_assert(ofproto);
     ovs_assert(ofproto->l3_mgr);
     ovs_assert(route);
 
-    VLOG_INFO("%s: ofproto %s, route %s, n_nexthops %u",
-              __FUNCTION__, ofproto->up.name,
-              route->prefix, route->n_nexthops);
+    VLOG_DBG("%s: ofproto %s, route %s, n_nexthops %u",
+             __FUNCTION__, ofproto->up.name, route->prefix, route->n_nexthops);
 
-    mgr = ofproto->l3_mgr;
-
-    ovs_mutex_lock(&mgr->mutex);
-    e = route_lookup(mgr, route->prefix);
+    e = route_lookup(ofproto->l3_mgr, route->prefix);
     if (e != NULL) {
-        ovs_mutex_unlock(&mgr->mutex);
-        return route_update(ofproto, route, e);
+        rc = route_update(ofproto, route, e);
+        route_unref(ofproto, e);
+        return rc;
     }
-    ovs_mutex_unlock(&mgr->mutex);
 
     rc = route_add(ofproto, route);
     return rc;
@@ -960,39 +1060,21 @@ delete_route_entry(struct ofproto_xpliant *ofproto,
                    struct ofproto_route *route)
 {
     xp_route_entry_t *e;
-    xp_nh_entry_t *nh;
-    xp_l3_mgr_t *mgr;
-    XP_STATUS status;
     int rc = 0;
 
     ovs_assert(ofproto);
-    ovs_assert(ofproto->l3_mgr);
     ovs_assert(route);
 
-    VLOG_INFO("%s: ofproto %s, route %s",
-              __FUNCTION__, ofproto->up.name, route->prefix);
+    VLOG_DBG("%s: ofproto %s, route %s",
+             __FUNCTION__, ofproto->up.name, route->prefix);
 
-    mgr = ofproto->l3_mgr;
-
-    ovs_mutex_lock(&mgr->mutex);
-    e = route_lookup(mgr, route->prefix);
+    e = route_lookup(ofproto->l3_mgr, route->prefix);
     if (e != NULL) {
-        hmap_remove(&mgr->route_map, &e->hmap_node);
-        ovs_mutex_unlock(&mgr->mutex);
-        VLOG_INFO("%s: RIB size %u. Removed route %s",
-                  __FUNCTION__, hmap_count(&mgr->route_map), route->prefix);
-
-        status = xpsL3RemoveIpRouteEntry(ofproto->xpdev->id, &e->xp_route);
-        if (status != XP_NO_ERR) {
-            VLOG_WARN("Failed to remove route from hardware. Err %d", status);
-        }
-
-        nh_group_unref(ofproto->l3_mgr, e->nh_group);
-        free(e->prefix);
-        free(e);
-
+        /* Un-reference the route since route_lookup() took a reference */
+        route_unref(ofproto, e);
+        /* Un-reference the route to trigger route removal */
+        route_unref(ofproto, e);
     } else {
-        ovs_mutex_unlock(&mgr->mutex);
         VLOG_WARN("Unknown route %s", route->prefix);
         rc = EFAULT;
     }
@@ -1004,29 +1086,21 @@ static int
 delete_nh_entry(struct ofproto_xpliant *ofproto, struct ofproto_route *route)
 {
     xp_route_entry_t *e;
-    xp_l3_mgr_t *mgr;
     xp_nh_entry_t *nh;
-    uint32_t nh_id;
     uint32_t n_nexthops;
     XP_STATUS status;
     xp_nh_group_entry_t *nh_group;
+    xp_nh_group_entry_t *old_nh_group;
     int rc;
     uint32_t i;
 
     ovs_assert(ofproto);
-    ovs_assert(ofproto->l3_mgr);
     ovs_assert(route);
 
-    VLOG_INFO("%s: ofproto %s, route %s, n_nexthops %u",
-              __FUNCTION__, ofproto->up.name,
-              route->prefix, route->n_nexthops);
+    VLOG_DBG("%s: ofproto %s, route %s, n_nexthops %u",
+             __FUNCTION__, ofproto->up.name, route->prefix, route->n_nexthops);
 
-    mgr = ofproto->l3_mgr;
-
-    ovs_mutex_lock(&mgr->mutex);
-    e = route_lookup(mgr, route->prefix);
-    ovs_mutex_unlock(&mgr->mutex);
-
+    e = route_lookup(ofproto->l3_mgr, route->prefix);
     if (e == NULL) {
         VLOG_WARN("%s: ofproto %s, route %s not found",
                   __FUNCTION__, ofproto->up.name, route->prefix);
@@ -1036,6 +1110,7 @@ delete_nh_entry(struct ofproto_xpliant *ofproto, struct ofproto_route *route)
     if (e->nh_group == NULL) {
         VLOG_WARN("%s: ofproto %s, route %s does not have nexthops",
                   __FUNCTION__, ofproto->up.name, route->prefix);
+        route_unref(ofproto, e);
         return 0;
     }
 
@@ -1053,26 +1128,13 @@ delete_nh_entry(struct ofproto_xpliant *ofproto, struct ofproto_route *route)
     if (e->nh_group->size > n_nexthops) {
         n_nexthops = e->nh_group->size - n_nexthops;
 
-        /* Allocate new NH group ID */
-        status = xpsL3CreateRouteNextHop(n_nexthops, &nh_id);
-        if (status != XP_NO_ERR) {
-            VLOG_ERR("Could not create next hop on hardware. "
-                     "Err %d", status);
-            return EFAULT;
-        }
-
         /* Allocate NH group */
         nh_group = nh_group_alloc(n_nexthops);
         if (nh_group == NULL) {
             VLOG_ERR("Failed to allocate NH group");
-            status = xpsL3DestroyRouteNextHop(n_nexthops, nh_id);
-            if (status != XP_NO_ERR) {
-                VLOG_ERR("Could not remove next hop on hardware. "
-                         "Err %d", status);
-            }
-            return EFAULT;
+            route_unref(ofproto, e);
+            return ENOMEM;
         }
-        nh_group->nh_id = nh_id;
 
         /* Copy valid NHs into the new NH group */
         HMAP_FOR_EACH(nh, hmap_node, &e->nh_group->nh_map) {
@@ -1089,19 +1151,31 @@ delete_nh_entry(struct ofproto_xpliant *ofproto, struct ofproto_route *route)
             }
         }
 
-        /* Create new NH group on HW */
-        rc = nh_group_add(ofproto, nh_group);
-        if (rc) {
-            VLOG_ERR("Failed to add next hop group");
+        old_nh_group = nh_group_lookup_by_group(ofproto->l3_mgr, nh_group);
+        if (old_nh_group) {
+            /* Reuse existing NH group */
             nh_group_free(nh_group);
-            return rc;
+            nh_group = old_nh_group;
+            VLOG_DBG("%s: reuse existing NH group %u",
+                     __FUNCTION__, nh_group->nh_id);
+        } else {
+            /* Create NH group on hardware */
+            rc = nh_group_add(ofproto, nh_group);
+            if (rc) {
+                VLOG_ERR("Failed to add NH group");
+                route_unref(ofproto, e);
+                nh_group_delete(ofproto, nh_group);
+                return rc;
+            }
+            VLOG_DBG("%s: create new NH group %u",
+                     __FUNCTION__, nh_group->nh_id);
         }
 
         e->xp_route.nhEcmpSize = nh_group->size;
         e->xp_route.nhId = nh_group->nh_id;
     } else {
-        VLOG_INFO("%s: ofproto %s, route %s without nexthops",
-                  __FUNCTION__, ofproto->up.name, e->prefix);
+        VLOG_DBG("%s: ofproto %s, route %s without nexthops",
+                 __FUNCTION__, ofproto->up.name, e->prefix);
         nh_group = NULL;
         e->xp_route.nhEcmpSize = 0;
         e->xp_route.nhId = 0;
@@ -1111,14 +1185,33 @@ delete_nh_entry(struct ofproto_xpliant *ofproto, struct ofproto_route *route)
     if (status) {
         VLOG_ERR("Could not update route on hardware. Err %d", status);
         if (nh_group) {
-            nh_group_free(nh_group);
+            /* Delete NH group that just has been created */
+            nh_group_delete(ofproto, nh_group);
         }
+        route_unref(ofproto, e);
         return EPERM;
     }
-    nh_group_unref(ofproto->l3_mgr, e->nh_group);
+
+    nh_group_unref(ofproto, e->nh_group);
     e->nh_group = nh_group;
+    route_unref(ofproto, e);
 
     return 0;
+}
+
+static void
+update_nexthop_error(int ret_code, struct ofproto_route *route)
+{
+    char *error_str = NULL;
+    struct ofproto_route_nexthop *nh;
+
+    error_str = strerror(ret_code);
+
+    for (int i = 0;  i < route->n_nexthops; i++) {
+        nh = &route->nexthops[i];
+        nh->err_str = error_str;
+        nh->rc = ret_code;
+    }
 }
 
 int
@@ -1129,6 +1222,7 @@ ops_xp_routing_route_entry_action(struct ofproto_xpliant *ofproto,
     int rc = 0;
 
     ovs_assert(ofproto);
+    ovs_assert(ofproto->l3_mgr);
     ovs_assert(route);
 
     VLOG_DBG("%s: vrfid: %d, action: %d", __FUNCTION__, ofproto->vrf_id, action);
@@ -1140,6 +1234,8 @@ ops_xp_routing_route_entry_action(struct ofproto_xpliant *ofproto,
 
     VLOG_DBG("action: %d, vrf: %d, prefix: %s, nexthops: %d",
               action, ofproto->vrf_id, route->prefix, route->n_nexthops);
+
+    ovs_mutex_lock(&ofproto->l3_mgr->mutex);
 
     switch (action) {
     case OFPROTO_ROUTE_ADD:
@@ -1157,9 +1253,10 @@ ops_xp_routing_route_entry_action(struct ofproto_xpliant *ofproto,
         break;
     }
 
-    if ((action == OFPROTO_ROUTE_ADD) && OPS_FAILURE(rc)) {
-        /* upadate the next hops error */
-        //ops_update_nexthop_error(rc, routep);
+    ovs_mutex_unlock(&ofproto->l3_mgr->mutex);
+
+    if ((action == OFPROTO_ROUTE_ADD) && (rc != 0)) {
+        update_nexthop_error(rc, route);
     }
 
     return rc;
@@ -1289,6 +1386,10 @@ ops_xp_routing_disable_l3_interface(struct ofproto_xpliant *ofproto,
     VLOG_INFO("%s: L3 interface ID 0x%08X, VLAN %u",
               __FUNCTION__, l3_intf->l3_intf_id, l3_intf->vlan_id);
 
+    /* Remove interface ID to name mapping in xpdev. */
+    ops_xp_dev_remove_intf_entry(ofproto->xpdev,
+                                 l3_intf->l3_intf_id, 0);
+
     if (!l3_intf->vlan_intf) {
         rc = ops_xp_vlan_member_remove(ofproto->vlan_mgr, l3_intf->vlan_id,
                                        l3_intf->intf_id);
@@ -1384,8 +1485,8 @@ error:
 
 xp_l3_intf_t *
 ops_xp_routing_enable_l3_interface(struct ofproto_xpliant *ofproto,
-                                   xpsInterfaceId_t if_id, xpsVlan_t vid,
-                                   macAddr_t mac)
+                                   xpsInterfaceId_t if_id, char *if_name, 
+                                   xpsVlan_t vid, macAddr_t mac)
 {
     XP_STATUS status;
     xpsInterfaceType_e if_type;
@@ -1404,7 +1505,7 @@ ops_xp_routing_enable_l3_interface(struct ofproto_xpliant *ofproto,
         return NULL;
     }
 
-    if (if_type != XPS_PORT) {
+    if ((if_type != XPS_PORT) && (if_type != XPS_LAG)) {
         VLOG_ERR("Invalid interface type %u. Error: %d", if_type, status);
         return NULL;
     }
@@ -1435,18 +1536,23 @@ ops_xp_routing_enable_l3_interface(struct ofproto_xpliant *ofproto,
         return NULL;
     }
 
+    /* Add interface ID to name mapping in xpdev.*/
+    ops_xp_dev_add_intf_entry(ofproto->xpdev,
+                              l3_intf->l3_intf_id,
+                              if_name, 0);
+
     l3_intf->vlan_intf = false;
     l3_intf->intf_id = if_id;
 
-    VLOG_INFO("%s: L3 interface ID 0x%08X", __FUNCTION__, l3_intf->l3_intf_id);
+    VLOG_DBG("%s: L3 interface ID 0x%08X", __FUNCTION__, l3_intf->l3_intf_id);
 
     return l3_intf;
 }
 
 xp_l3_intf_t *
 ops_xp_routing_enable_l3_subinterface(struct ofproto_xpliant *ofproto,
-                                      xpsInterfaceId_t if_id, xpsVlan_t vid,
-                                      macAddr_t mac)
+                                      xpsInterfaceId_t if_id, char *if_name,
+                                      xpsVlan_t vid, macAddr_t mac)
 {
     XP_STATUS status;
     xpsInterfaceType_e if_type;
@@ -1498,17 +1604,23 @@ ops_xp_routing_enable_l3_subinterface(struct ofproto_xpliant *ofproto,
         return NULL;
     }
 
+    /* Add interface ID to name mapping in xpdev.*/
+    ops_xp_dev_add_intf_entry(ofproto->xpdev,
+                              l3_intf->l3_intf_id,
+                              if_name, 0);
+
     l3_intf->vlan_intf = false;
     l3_intf->intf_id = if_id;
 
-    VLOG_INFO("%s: L3 interface ID 0x%08X", __FUNCTION__, l3_intf->l3_intf_id);
+    VLOG_DBG("%s: L3 interface ID 0x%08X", __FUNCTION__, l3_intf->l3_intf_id);
 
     return l3_intf;
 }
 
 xp_l3_intf_t *
 ops_xp_routing_enable_l3_vlan_interface(struct ofproto_xpliant *ofproto,
-                                        xpsVlan_t vid, macAddr_t mac)
+                                        xpsVlan_t vid, char *if_name, 
+                                        macAddr_t mac)
 {
     xp_l3_intf_t *l3_intf;
     int rc;
@@ -1527,9 +1639,14 @@ ops_xp_routing_enable_l3_vlan_interface(struct ofproto_xpliant *ofproto,
         return NULL;
     }
 
+    /* Add interface ID to name mapping in xpdev.*/
+    ops_xp_dev_add_intf_entry(ofproto->xpdev,
+                              l3_intf->l3_intf_id,
+                              if_name, 0);
+
     l3_intf->vlan_intf = true;
 
-    VLOG_INFO("%s: L3 interface ID 0x%08X", __FUNCTION__, l3_intf->l3_intf_id);
+    VLOG_DBG("%s: L3 interface ID 0x%08X", __FUNCTION__, l3_intf->l3_intf_id);
 
     return l3_intf;
 }

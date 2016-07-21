@@ -43,7 +43,7 @@
 #define netdev_register libovs_xpliant_plugin_LTX_netdev_register
 #define ofproto_register libovs_xpliant_plugin_LTX_ofproto_register
 
-VLOG_DEFINE_THIS_MODULE(xpliant_plugin);
+VLOG_DEFINE_THIS_MODULE(xp_plugin);
 
 struct asic_plugin_interface xpliant_interface = {
     /* The new functions that need to be exported, can be declared here */

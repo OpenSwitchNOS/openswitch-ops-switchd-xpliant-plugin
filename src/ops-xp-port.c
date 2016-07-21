@@ -54,6 +54,38 @@ ops_xp_port_mac_mode_set(struct xp_port_info *p_info, xpMacConfigMode mac_mode)
     uint8_t mac_num;
     int rc, port_cnt, i = 0;
 
+    /* Check whether the port has been initialized */
+    if (!p_info->initialized) {
+        XP_LOCK();
+        status = xpsIsPortInited(p_info->id, p_info->port_num);
+        XP_UNLOCK();
+        p_info->initialized = (status == XP_PORT_NOT_INITED) ? false : true;
+
+        if (!p_info->initialized) {
+            XP_LOCK();
+            status = xpsMacGetMacNumForPortNum(p_info->id, p_info->port_num,
+                                               &mac_num);
+            if (status != XP_NO_ERR) {
+                XP_UNLOCK();
+                VLOG_ERR("%s: unable to get MAC number for port %u. Err=%d",
+                         __FUNCTION__, p_info->port_num, status);
+                return EFAULT;
+            }
+
+            status = xpsMacPortGroupInit(p_info->id, mac_num, mac_mode,
+                                         SPEED_MAX_VAL, 1 /*initSerdes*/,
+                                         0 /*prbsMode*/, 0 /*firmwareUpload*/,
+                                         MAX_FEC_MODE, 0 /*enableFEC*/);
+            XP_UNLOCK();
+            if (status != XP_NO_ERR) {
+                VLOG_ERR("%s: unable to initialize port group %u. Err=%d",
+                         __FUNCTION__, mac_num, status);
+                return EFAULT;
+            }
+            p_info->initialized = true;
+        }
+    }
+
     if (mac_mode == p_info->port_mac_mode) {
         /* Already in the correct lane split state. */
         VLOG_DBG("Port is already in the correct MAC mode."

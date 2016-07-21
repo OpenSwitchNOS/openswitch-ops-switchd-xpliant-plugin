@@ -59,6 +59,7 @@ typedef struct {
 typedef struct {
     struct hmap_node hmap_node; /* Node in a xp_l3_mgr's route_map. */
     char *prefix;
+    struct ovs_refcount ref_cnt;/* Number of references to this route */
     xpsL3RouteEntry_t xp_route;
     xp_nh_group_entry_t *nh_group;
 } xp_route_entry_t;
@@ -103,12 +104,11 @@ typedef struct net_address {
 
 struct ofproto_xpliant;
 
-#define OPS_FAILURE(rc) (((rc) < 0 ) || ((rc) == EINVAL))
 
 xp_l3_mgr_t *ops_xp_l3_mgr_create(xpsDevice_t devId);
 xp_l3_mgr_t *ops_xp_l3_mgr_ref(xp_l3_mgr_t *mgr);
-void ops_xp_l3_mgr_unref(xp_l3_mgr_t *mgr);
-void ops_xp_l3_mgr_destroy(xp_l3_mgr_t *mgr);
+void ops_xp_l3_mgr_unref(struct ofproto_xpliant *ofproto);
+void ops_xp_l3_mgr_destroy(struct ofproto_xpliant *ofproto);
 
 int ops_xp_routing_add_host_entry(struct ofproto_xpliant *ofproto,
                                   xpsInterfaceId_t port_intf_id,
@@ -118,7 +118,6 @@ int ops_xp_routing_add_host_entry(struct ofproto_xpliant *ofproto,
                                   xpsVlan_t vid, bool local, int *l3_egress_id);
 
 int ops_xp_routing_delete_host_entry(struct ofproto_xpliant *ofproto,
-                                     bool is_ipv6_addr, char *ip_addr,
                                      int *l3_egress_id);
 
 int ops_xp_routing_route_entry_action(struct ofproto_xpliant *ofproto,
@@ -130,17 +129,18 @@ int ops_xp_routing_ecmp_hash_set(struct ofproto_xpliant *ofproto,
 
 xp_l3_intf_t *ops_xp_routing_enable_l3_interface(
                                     struct ofproto_xpliant *ofproto,
-                                    xpsInterfaceId_t if_id, xpsVlan_t vid,
-                                    macAddr_t mac);
+                                    xpsInterfaceId_t if_id, char *if_name,
+                                    xpsVlan_t vid, macAddr_t mac);
 
 xp_l3_intf_t *ops_xp_routing_enable_l3_subinterface(
                                     struct ofproto_xpliant *ofproto,
-                                    xpsInterfaceId_t if_id, xpsVlan_t vid,
-                                    macAddr_t mac);
+                                    xpsInterfaceId_t if_id, char *if_name,
+                                    xpsVlan_t vid, macAddr_t mac);
 
 xp_l3_intf_t *ops_xp_routing_enable_l3_vlan_interface(
                                     struct ofproto_xpliant *ofproto,
-                                    xpsVlan_t vid, macAddr_t mac);
+                                    xpsVlan_t vid, char *if_name,
+                                    macAddr_t mac);
 
 void ops_xp_routing_disable_l3_interface(struct ofproto_xpliant *ofproto,
                                          xp_l3_intf_t *l3_intf);

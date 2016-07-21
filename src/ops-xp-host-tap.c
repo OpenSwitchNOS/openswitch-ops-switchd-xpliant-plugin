@@ -54,6 +54,8 @@ struct tap_if_entry {
     /* Node in a fd_to_tap_if_map. */
     struct hmap_node fd_node;
     xpsInterfaceId_t if_id;
+    /* ID of the interface which will be used for sending. */
+    xpsInterfaceId_t send_if_id;
     int fd;
     char *name;
 };
@@ -316,6 +318,8 @@ tap_if_filter_create(char *name, struct xpliant_dev *xp_dev,
 {
     struct tap_info *info;
     struct tap_if_entry *if_entry;
+    xpsInterfaceType_e if_type;
+    XP_STATUS status = XP_NO_ERR;
 
     ovs_assert(xp_dev);
     ovs_assert(xp_dev->host_if_info);
@@ -348,7 +352,23 @@ tap_if_filter_create(char *name, struct xpliant_dev *xp_dev,
 
     *host_filter_id = xps_if_id + 1;
 
-    if_entry->if_id = xps_if_id;
+    status = xpsInterfaceGetType(xps_if_id, &if_type);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("%s, Failed to get interface type. Error: %d", 
+                 __FUNCTION__, status);
+        return EPERM;
+    }
+
+    if_entry->if_id = if_entry->send_if_id = xps_if_id;
+
+    if (if_type == XPS_PORT) {
+        status = xpsPortGetPortControlIntfId(xp_dev->id, if_entry->if_id,
+                                             &if_entry->send_if_id);
+        if (status) {
+            VLOG_ERR("%s, Unable to get control interface ID for port: %u. ERR%u",
+                     __FUNCTION__, xps_if_id, status);
+        }
+    }
 
     hmap_insert(&info->if_id_to_tap_if_map, &if_entry->if_id_node,
                 if_entry->if_id);
@@ -503,7 +523,7 @@ tap_listener(void *arg)
                     ovs_mutex_unlock(&info->mutex);
                     continue;
                 }
-                egress_if_id = if_entry->if_id;
+                egress_if_id = if_entry->send_if_id;
 
                 ovs_mutex_unlock(&info->mutex);
 

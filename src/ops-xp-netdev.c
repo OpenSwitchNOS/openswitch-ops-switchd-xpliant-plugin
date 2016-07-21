@@ -250,7 +250,7 @@ netdev_xpliant_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
     struct xp_port_info *port_info = NULL;
     struct ether_addr ZERO_MAC = {{0}};
     struct ether_addr *ether_mac = &ZERO_MAC;
-    int xp_err = XP_NO_ERR;
+    int status = XP_NO_ERR;
     int rc = 0;
     uint32_t dev_num;
     xpsPortConfig_t port_config;
@@ -296,21 +296,21 @@ netdev_xpliant_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
         }
 
         XP_LOCK();
-        xp_err = xpsPortGetPortIntfId(netdev->xpdev->id, netdev->port_num,
+        status = xpsPortGetPortIntfId(netdev->xpdev->id, netdev->port_num,
                                       &netdev->ifId);
-        if (xp_err != XP_NO_ERR) {
+        if (status != XP_NO_ERR) {
             XP_UNLOCK();
             VLOG_ERR("%s: could not get port ifId for port #%u. Err=%d",
-                     __FUNCTION__, netdev->port_num, xp_err);
+                     __FUNCTION__, netdev->port_num, status);
             goto error;
         }
 
-        xp_err = xpsPortGetConfig(netdev->xpdev->id, netdev->ifId,
+        status = xpsPortGetConfig(netdev->xpdev->id, netdev->ifId,
                                   &port_config);
-        if (xp_err != XP_NO_ERR) {
+        if (status != XP_NO_ERR) {
             XP_UNLOCK();
             VLOG_ERR("%s: could not set port config for port #%u. Err=%d",
-                     __FUNCTION__, netdev->ifId, xp_err);
+                     __FUNCTION__, netdev->ifId, status);
             goto error;
         }
         XP_UNLOCK();
@@ -337,6 +337,10 @@ netdev_xpliant_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
         port_info->port_mac_mode = MAC_MODE_MAX_VAL;
         port_info->serdes_tuned = false;
 
+        XP_LOCK();
+        status = xpsIsPortInited(netdev->xpdev->id, netdev->port_num);
+        XP_UNLOCK();
+        port_info->initialized = (status == XP_PORT_NOT_INITED) ? false : true;
 
         /* For all the ports that can be split into multiple
          * subports, 'split_4' property is set to true.
@@ -370,6 +374,9 @@ netdev_xpliant_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
                              netdev->up.name, split_parent);
                     goto error;
                 }
+            } else {
+                /* Port is not splittable */
+                port_info->port_mac_mode = MAC_MODE_4X10GB;
             }
         }
 
@@ -574,7 +581,11 @@ netdev_xpliant_set_hw_intf_config(struct netdev *netdev_, const struct smap *arg
             mac_mode = get_parent_mac_mode(pcfg.speed);
             ops_xp_port_mac_mode_set(netdev->port_info, mac_mode);
         } else if (netdev->is_split_subport) {
+            /* Subport of splittable port */
             ops_xp_port_mac_mode_set(netdev->parent_port_info, mac_mode);
+        } else {
+            /* Port is not splittable */
+            ops_xp_port_mac_mode_set(netdev->port_info, mac_mode);
         }
     }
 

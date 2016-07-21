@@ -255,6 +255,44 @@ class xpSimTest( OpsVsiTest ):
         assert status, "Ping Failed even though VLAN and ports were configured correctly"
         info("### Ping Success ###\n")
 
+    def static_lag_l3(self):
+        i = 1 
+        for s in self.net.switches:
+            info("### Configuring L3 LAG with ports 1,2 on switch %d... ###\n" %i)
+            s.cmdCLI("configure terminal")
+            s.cmdCLI("interface lag 1")
+            s.cmdCLI("routing")
+            s.cmdCLI("no shutdown")
+            s.cmdCLI("ip address 10.10.10.%d/24" %i)
+            s.cmdCLI("exit")
+
+            for intf in range (1, 3):
+                s.cmdCLI("interface %d" %intf)
+                s.cmdCLI("lag 1")
+                s.cmdCLI("exit")
+
+            s.cmdCLI("exit")
+            i += 1
+
+        #info("Sleep 60\n")
+        #time.sleep(60)
+
+        s1 = self.net.switches[ 0 ]
+        s2 = self.net.switches[ 1 ]
+
+        info("### Ping s2 from s1 through L3 LAG ###\n")
+        out = s1.cmd("ip netns exec swns ping -c5 -i1.2 10.10.10.2")
+
+        status = checkPing(out)
+        assert status, "Ping Failed"
+
+        info("### Ping s1 from s2 through L3 LAG ###\n")
+        out = s2.cmd("ip netns exec swns ping -c5 -i1.2 10.10.10.1")
+
+        status = checkPing(out)
+        assert status, "Ping Failed"
+        info("### Ping Success ###\n")
+
     def dynamic_lag(self):
         h1 = self.net.hosts[ 0 ]
         h2 = self.net.hosts[ 1 ]
@@ -264,6 +302,8 @@ class xpSimTest( OpsVsiTest ):
             info("### Configuring dynamic LAG with ports 1,2 on switch %d... ###\n" %i)
             s.cmdCLI("configure terminal")
             s.cmdCLI("interface lag 1")
+            s.cmdCLI("no routing")
+            s.cmdCLI("vlan access 300")
             s.cmdCLI("lacp mode active")
             s.cmdCLI("exit")
             s.cmdCLI("exit")
@@ -308,8 +348,13 @@ class Test_switchd_xpliant_p2p:
         self.test.static_lag()
 
     # TC_3
-    def test_switchd_xpliant_dynamic_lag(self):
+    def test_switchd_xpliant_static_lag_l3(self):
         info("\n\n########## Test Case 3 ##########\n")
+        self.test.static_lag_l3()
+
+    # TC_4
+    def test_switchd_xpliant_dynamic_lag(self):
+        info("\n\n########## Test Case 4 ##########\n")
         self.test.dynamic_lag()
 
     def teardown_class(cls):
