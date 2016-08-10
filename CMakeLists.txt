@@ -25,6 +25,7 @@ set (SOURCES ${SRC_DIR}/ops-xp-dev-init.c
              ${SRC_DIR}/ops-xp-dev.c
              ${SRC_DIR}/ops-xp-plugins.c
              ${SRC_DIR}/ops-xp-ofproto-provider.c
+             ${SRC_DIR}/ops-xp-ofproto-datapath.c
              ${SRC_DIR}/ops-xp-netdev.c
              ${SRC_DIR}/ops-xp-util.c
              ${SRC_DIR}/ops-xp-vlan.c

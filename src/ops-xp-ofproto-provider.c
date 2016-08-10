@@ -30,6 +30,7 @@
 #include <net/ethernet.h>
 
 #include "ops-xp-ofproto-provider.h"
+#include "ops-xp-ofproto-datapath.h"
 #include "netdev-provider.h"
 #include "netdev.h"
 #include "poll-loop.h"
@@ -2414,16 +2415,16 @@ const struct ofproto_class ofproto_xpliant_class = {
 /* ## OpenFlow Rule Functions ## */
 /* ## ----------------------- ## */
     NULL,                       /* rule_choose_table */
-    NULL,                       /* rule_alloc */
-    NULL,                       /* rule_construct */
-    NULL,                       /* rule_insert */
-    NULL,                       /* rule_delete */
-    NULL,                       /* rule_destruct */
-    NULL,                       /* rule_dealloc */
-    NULL,                       /* rule_get_stats */
-    NULL,                       /* rule_execute */
-    NULL,                       /* set_frag_handling */
-    NULL,                       /* packet_out */
+    ofproto_xpliant_rule_alloc,
+    ofproto_xpliant_rule_construct,
+    ofproto_xpliant_rule_insert,
+    ofproto_xpliant_rule_delete,
+    ofproto_xpliant_rule_destruct,
+    ofproto_xpliant_rule_dealloc,
+    ofproto_xpliant_rule_get_stats,
+    ofproto_xpliant_rule_execute,
+    ofproto_xpliant_set_frag_handling,
+    ofproto_xpliant_packet_out,
 
 /* ## ------------------------- ## */
 /* ## OFPP_NORMAL configuration ## */
@@ -2482,14 +2483,14 @@ const struct ofproto_class ofproto_xpliant_class = {
 /* ## -------------------- ## */
 /* ## OpenFlow 1.1+ groups ## */
 /* ## -------------------- ## */
-    NULL,                       /* group_alloc */
-    NULL,                       /* group_construct */
-    NULL,                       /* group_destruct */
-    NULL,                       /* group_dealloc */
-    NULL,                       /* group_modify */
-    NULL,                       /* group_get_stats */
+    ofproto_xpliant_group_alloc,
+    ofproto_xpliant_group_construct,
+    ofproto_xpliant_group_destruct,
+    ofproto_xpliant_group_dealloc,
+    ofproto_xpliant_group_modify,
+    ofproto_xpliant_group_get_stats,
+    ofproto_xpliant_get_datapath_version,
 
-    NULL,                       /* get_datapath_version */
     ofproto_xpliant_add_l3_host_entry,
     ofproto_xpliant_delete_l3_host_entry,
     ofproto_xpliant_get_l3_host_hit,
