@@ -210,6 +210,12 @@ ops_xp_port_event_handler(void *arg)
                             VLOG_WARN("%s: could not tune serdes for port %u. Err=%d",
                                       __FUNCTION__, port_info->port_num, status);
                         }
+                        status = xpsMacPortSerdesDfeWait(port_info->id,
+                                                         port_info->port_num);
+                        if (status != XP_NO_ERR) {
+                            VLOG_WARN("%s: Serdes Dfe wait failed for port %u. Err=%d",
+                                      __FUNCTION__, port_info->port_num, status);
+                        }
                         /* Apply additional handling for 100G ports */
                         if (port_info->port_mac_mode == MAC_MODE_1X100GB) {
                             status = xpsMacPortSerdesSignalOverride(port_info->id,
@@ -363,24 +369,6 @@ ops_xp_port_set_config(struct netdev_xpliant *netdev,
             link_netdev(netdev);
 
             XP_LOCK();
-            status = xpsPortGetConfig(netdev->xpdev->id, netdev->ifId,
-                                     &port_config);
-            if (status != XP_NO_ERR) {
-                XP_UNLOCK();
-                VLOG_ERR("%s: could not set port config for port #%u. Err=%d",
-                         __FUNCTION__, netdev->ifId, status);
-                return EFAULT;
-            }
-
-            port_config.portState = SPAN_STATE_FORWARD;
-            status = xpsPortSetConfig(netdev->xpdev->id, netdev->ifId,
-                                      &port_config);
-            if (status != XP_NO_ERR) {
-                XP_UNLOCK();
-                VLOG_ERR("%s: could not set port config for port #%u. Err=%d",
-                         __FUNCTION__, netdev->ifId, status);
-                return EFAULT;
-            }
 
             status = xpsPolicerEnablePortPolicing(netdev->ifId, 1);
             if (status != XP_NO_ERR) {

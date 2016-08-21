@@ -26,6 +26,7 @@
 
 #include <errno.h>
 
+#include "ops-xp-classifier.h"
 #include "ops-xp-dev.h"
 #include "ops-xp-dev-init.h"
 #include "ops-xp-util.h"
@@ -123,6 +124,7 @@ ops_xp_sdk_dev_add(xpsDevice_t devId, xpInitType_t initType,
 
     VLOG_INFO("%s (devId = 0x%x) done.\n", __FUNCTION__, devId);
 
+
     return XP_NO_ERR;
 }
 
@@ -166,6 +168,8 @@ ops_xp_dev_config(xpsDevice_t deviceId, void *arg)
     }
     VLOG_INFO("XP device instance allocated!\n");
 
+    /*acl related init*/
+    ops_xp_cls_init(deviceId);
     return status;
 }
 

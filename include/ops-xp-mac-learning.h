@@ -181,7 +181,7 @@ int ops_xp_mac_learning_expire(struct xp_mac_learning *ml,
                                struct xp_mac_entry *e)
     OVS_REQ_WRLOCK(ml->rwlock);
 
-void ops_xp_mac_learning_flush(struct xp_mac_learning *ml)
+void ops_xp_mac_learning_flush(struct xp_mac_learning *ml, bool dynamic_only)
     OVS_REQ_WRLOCK(ml->rwlock);
 
 int ops_xp_mac_learning_flush_vlan(struct xp_mac_learning *ml,
@@ -189,7 +189,8 @@ int ops_xp_mac_learning_flush_vlan(struct xp_mac_learning *ml,
     OVS_REQ_WRLOCK(ml->rwlock);
 
 int ops_xp_mac_learning_flush_intfId(struct xp_mac_learning *ml,
-                                     xpsInterfaceId_t  intfId)
+                                     xpsInterfaceId_t intfId,
+                                     bool dynamic_only)
     OVS_REQ_WRLOCK(ml->rwlock);
 
 int ops_xp_mac_learning_flush_vlan_intf(struct xp_mac_learning *ml,
@@ -210,7 +211,7 @@ void ops_xp_mac_learning_on_aging(xpsDevice_t devId, uint32_t *index,
 int ops_xp_mac_learning_on_vlan_removed(struct xp_mac_learning *ml,
                                         xpsVlan_t vlanId);
 int ops_xp_mac_learning_on_port_down(struct xp_mac_learning *ml,
-                                     xpsInterfaceId_t  intfId);
+                                     xpsInterfaceId_t intfId);
 void ops_xp_mac_learning_on_vni_removed(struct xp_mac_learning *ml,
                                         xpsVlan_t vlan, uint32_t vni,
                                         xpsInterfaceId_t if_id);

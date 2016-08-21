@@ -117,10 +117,23 @@ ops_xp_dev_by_id(xpsDevice_t id)
 
     XP_LOCK();
     dev = _xp_dev_by_id(id);
+
     if (dev) {
-        dev->ref_cnt++;
+        ovs_refcount_ref(&dev->ref_cnt);
     }
     XP_UNLOCK();
+
+    return dev;
+}
+
+/* References xpliant_dev. */
+struct xpliant_dev *
+ops_xp_dev_ref(const struct xpliant_dev *dev_)
+{
+    struct xpliant_dev *dev = CONST_CAST(struct xpliant_dev *, dev_);
+    if (dev) {
+        ovs_refcount_ref(&dev->ref_cnt);
+    }
     return dev;
 }
 
@@ -160,7 +173,7 @@ ops_xp_dev_alloc(xpsDevice_t id)
     dev = xzalloc(sizeof *dev);
 
     dev->id = id;
-    dev->ref_cnt = 0;
+    ovs_refcount_init(&dev->ref_cnt);
     dev->init_done = false;
     latch_init(&dev->exit_latch);
     latch_init(&dev->rxq_latch);
@@ -238,6 +251,14 @@ ops_xp_dev_system_defaults_set(const struct xpliant_dev *dev)
     status = xpsVlanSetGlobalControlMac(dev->id, key_mac);
     if (status != XP_NO_ERR) {
         VLOG_ERR("%s: Error in inserting control MAC entry for LLDP. "
+                 "Error code: %d\n", __FUNCTION__, status);
+    }
+
+    ops_xp_mac_copy_and_reverse(key_mac, eth_addr_stp.ea);
+
+    status = xpsVlanSetGlobalControlMac(dev->id, key_mac);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("%s: Error in inserting control MAC entry for STP. "
                  "Error code: %d\n", __FUNCTION__, status);
     }
 }
@@ -359,11 +380,11 @@ ops_xp_dev_free(struct xpliant_dev * const dev)
 
     if (_xp_dev_by_id(dev->id) != dev) {
         VLOG_WARN("XPliant device #%d has already been deallocated.", dev->id);
-        ovs_mutex_unlock(&xpdev_mutex);
+        XP_UNLOCK();
         return;
     }
 
-    if (--dev->ref_cnt == 0) {
+    if (ovs_refcount_unref(&dev->ref_cnt) == 1) {
 
         if (dev->rx_mode == INTR) {
             ret = xpsPacketDriverCompletionHndlrDeRegister(dev->id, PD_ALL);

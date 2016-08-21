@@ -149,3 +149,22 @@ ops_xp_host_filter_delete(char *name, struct xpliant_dev *xp_dev,
         info->exec->if_filter_delete(xp_dev, xpnet_filter_id);
     }
 }
+
+int
+ops_xp_host_port_control_if_id_set(struct xpliant_dev *xp_dev,
+                                   xpsInterfaceId_t xps_if_id,
+                                   int xpnet_if_id, bool set)
+{
+    struct xp_host_if_info *info;
+    int rc = EOPNOTSUPP;
+
+    ovs_assert(xp_dev);
+    ovs_assert(xp_dev->host_if_info);
+
+    info = xp_dev->host_if_info;
+    if (info->exec->if_control_id_set) {
+        rc = info->exec->if_control_id_set(xp_dev, xps_if_id, xpnet_if_id, set);
+    }
+
+    return rc;
+}

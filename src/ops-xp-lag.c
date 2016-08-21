@@ -29,6 +29,8 @@
 #include <netdev.h>
 
 #include "ops-xp-lag.h"
+#include "ops-xp-host.h"
+#include "ops-xp-netdev.h"
 #include "openXpsLag.h"
 #include "openXpsInterface.h"
 
@@ -187,7 +189,11 @@ lag_attach_port_on_hw(xpsDevice_t dev_id, xpsInterfaceId_t lag_id,
                       xpsInterfaceId_t if_id)
 {
     XP_STATUS status;
+    struct xpliant_dev *dev;
     xpsInterfaceId_t found_lag_id;
+    struct netdev_xpliant *netdev;
+    int xpnet_if_id;
+    int ret;
 
     status = xpsLagGetFirst(&found_lag_id);
 
@@ -210,8 +216,27 @@ lag_attach_port_on_hw(xpsDevice_t dev_id, xpsInterfaceId_t lag_id,
         status = xpsLagGetNext(found_lag_id, &found_lag_id);
     }
 
+    netdev = ops_xp_netdev_from_port_num(dev_id, if_id);
+    if (!netdev) {
+        VLOG_ERR("%s: Could not get netdev for port: %u", __FUNCTION__, if_id);
+        return ENOENT;
+    }
+
+    ovs_mutex_lock(&netdev->mutex);
+    dev = ops_xp_dev_ref(netdev->xpdev);
+    xpnet_if_id = netdev->xpnet_if_id;
+    ovs_mutex_unlock(&netdev->mutex);
+
+    ret = ops_xp_host_port_control_if_id_set(dev, if_id, xpnet_if_id, true);
+    if (ret) {
+        VLOG_ERR("%s: Could not set port control interface ID for port: %u",
+                 __FUNCTION__, if_id);
+        return ret;
+    }
+
     status = xpsLagAddPort(lag_id, if_id);
     if (status != XP_NO_ERR) {
+        ops_xp_host_port_control_if_id_set(dev, if_id, xpnet_if_id, false);
         VLOG_ERR("%s: Could not add port: %u to LAG: %u. Error code: %d",
                  __FUNCTION__, lag_id, if_id, status);
         return EFAULT;
@@ -219,10 +244,13 @@ lag_attach_port_on_hw(xpsDevice_t dev_id, xpsInterfaceId_t lag_id,
 
     status = xpsLagDeploy(dev_id, lag_id, AUTO_DIST_ENABLE);
     if (status != XP_NO_ERR) {
+        ops_xp_host_port_control_if_id_set(dev, if_id, xpnet_if_id, false);
         VLOG_ERR("%s: Could not deploy LAG %u changes to hardware. "
                  "Error code: %d\n", __FUNCTION__, lag_id, status);
         return EFAULT;
     }
+
+    ops_xp_dev_free(dev);
 
     VLOG_INFO("%s: Added port: %u to LAG: %u on hardware.",
               __FUNCTION__, if_id, lag_id);
@@ -236,6 +264,8 @@ lag_detach_port_on_hw(xpsDevice_t dev_id, xpsInterfaceId_t lag_id,
                       xpsInterfaceId_t if_id)
 {
     XP_STATUS status;
+    struct netdev_xpliant *netdev;
+    int xpnet_if_id;
 
     if (!lag_is_port_attached(lag_id, if_id)) {
         return 0;
@@ -253,6 +283,25 @@ lag_detach_port_on_hw(xpsDevice_t dev_id, xpsInterfaceId_t lag_id,
         VLOG_ERR("%s: Could not deploy LAG %u changes to hardware. "
                  "Error code: %d\n", __FUNCTION__, lag_id, status);
         return EFAULT;
+    }
+
+    netdev = ops_xp_netdev_from_port_num(dev_id, if_id);
+    if (netdev) {
+        struct xpliant_dev *dev;
+
+        ovs_mutex_lock(&netdev->mutex);
+        dev = ops_xp_dev_ref(netdev->xpdev);
+        xpnet_if_id = netdev->xpnet_if_id;
+        ovs_mutex_unlock(&netdev->mutex);
+
+        if (ops_xp_host_port_control_if_id_set(dev, if_id, xpnet_if_id, false)) {
+            VLOG_ERR("%s: Could not unset port control interface ID "
+                     "for port: %u", __FUNCTION__, if_id);
+        }
+
+        ops_xp_dev_free(dev);
+    } else {
+         VLOG_ERR("%s: Could not get netdev for port: %u", __FUNCTION__, if_id);
     }
 
     VLOG_INFO("%s: Removed port: %u from LAG: %u on hardware.", 

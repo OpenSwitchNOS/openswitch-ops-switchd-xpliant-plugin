@@ -59,7 +59,7 @@ struct xpliant_dev {
     pthread_t event_thread;         /* Event processing Thread ID. */
     struct latch exit_latch;        /* Tells child threads to exit. */
     struct latch rxq_latch;         /* Tells child threads to handle pkt Rx. */
-    int ref_cnt;                    /* Times this devices was opened. */
+    struct ovs_refcount ref_cnt;    /* Times this devices was opened. */
     bool init_done;
 
     struct xp_vlan_mgr *vlan_mgr;
@@ -78,6 +78,7 @@ struct xpliant_dev {
 
 int ops_xp_dev_srv_init(void);
 struct xpliant_dev *ops_xp_dev_by_id(xpsDevice_t id);
+struct xpliant_dev *ops_xp_dev_ref(const struct xpliant_dev *dev);
 struct xpliant_dev *ops_xp_dev_alloc(xpsDevice_t id);
 void ops_xp_dev_free(struct xpliant_dev * const dev);
 int ops_xp_dev_init(struct xpliant_dev * dev);

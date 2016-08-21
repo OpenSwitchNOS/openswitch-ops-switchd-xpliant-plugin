@@ -55,6 +55,9 @@ static int netdev_if_filter_delete(struct xpliant_dev *xp_dev,
 static int netdev_if_filter_create(char *filter_name, struct xpliant_dev *xp_dev,
                                    xpsInterfaceId_t xps_if_id,
                                    int xpnet_if_id, int *xpnet_filter_id);
+static int netdev_if_control_id_set(struct xpliant_dev *xp_dev,
+                                    xpsInterfaceId_t xps_if_id, 
+                                    int xpnet_if_id, bool set);
 
 const struct xp_host_if_api xp_host_netdev_api = {
     netdev_init,
@@ -63,6 +66,7 @@ const struct xp_host_if_api xp_host_netdev_api = {
     netdev_if_delete,
     netdev_if_filter_create,
     netdev_if_filter_delete,
+    netdev_if_control_id_set,
 };
 
 static int
@@ -95,6 +99,7 @@ netdev_if_create(struct xpliant_dev *xp_dev, char *intf_name,
                  struct ether_addr *mac, int *xpnet_if_id)
 {
     int xpnetId = 0;
+    XP_STATUS status;
 
     if (XP_NO_ERR != xpsNetdevXpnetIdAllocate(xp_dev->id, &xpnetId)) {
         VLOG_ERR("%s, Unable to allocate xpnetId for interface: %u, %s",
@@ -105,6 +110,15 @@ netdev_if_create(struct xpliant_dev *xp_dev, char *intf_name,
     if (XP_NO_ERR != xpsNetdevIfCreate(xp_dev->id, xpnetId, intf_name)) {
         VLOG_ERR("%s, Unable to create interface: %u, %s",
                  __FUNCTION__ ,xps_if_id, intf_name);
+        return EPERM;
+    }
+
+    status = xpsNetdevIfTxHeaderSet(xp_dev->id, xpnetId, xps_if_id, true);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("%s, Unable to set tx header for interface: %u",
+                 __FUNCTION__, xps_if_id);
+        xpsNetdevIfDelete(xp_dev->id, xpnetId);
+        xpsNetdevXpnetIdFree(xp_dev->id, xpnetId);
         return EPERM;
     }
 
@@ -137,32 +151,6 @@ netdev_if_filter_create(char *filter_name, struct xpliant_dev *xp_dev,
                         xpsInterfaceId_t xps_if_id,
                         int xpnet_if_id, int *xpnet_filter_id)
 {
-    xpsInterfaceId_t send_if_id = xps_if_id;
-    xpsInterfaceType_e if_type;
-    XP_STATUS status = XP_NO_ERR;
-
-    status = xpsInterfaceGetType(xps_if_id, &if_type);
-    if (status != XP_NO_ERR) {
-        VLOG_ERR("%s, Failed to get interface type. Error: %d", 
-                 __FUNCTION__, status);
-        return EPERM;
-    }
-
-    if (if_type == XPS_PORT) {
-        status = xpsPortGetPortControlIntfId(xp_dev->id, xps_if_id, &send_if_id);
-        if (status) {
-            VLOG_ERR("%s, Unable to get control interface ID for port: %u. ERR%u",
-                     __FUNCTION__, xps_if_id, status);
-        }
-    }
-
-    if (XP_NO_ERR != xpsNetdevIfTxHeaderSet(xp_dev->id, xpnet_if_id, send_if_id,
-                                            true)) {
-        VLOG_ERR("%s, Unable to set tx header for interface: %u",
-                 __FUNCTION__, xps_if_id);
-        return EPERM;
-    }
-
     if (XP_NO_ERR != xpsNetdevIfLinkSet(xp_dev->id, xpnet_if_id, xps_if_id,
                                         true)) {
         xpsNetdevIfTxHeaderSet(xp_dev->id, xpnet_if_id, xps_if_id, false);
@@ -180,8 +168,48 @@ netdev_if_filter_delete(struct xpliant_dev *xp_dev, int xpnet_filter_id)
 {
     uint32_t xpnet_if_id = xpnet_filter_id;
 
-    xpsNetdevIfTxHeaderSet(xp_dev->id, xpnet_if_id, 0, false);
     xpsNetdevIfLinkSet(xp_dev->id, xpnet_if_id, 0, false);
+
+    return 0;
+}
+
+static int
+netdev_if_control_id_set(struct xpliant_dev *xp_dev,
+                         xpsInterfaceId_t xps_if_id, 
+                         int xpnet_if_id, bool set)
+{
+    xpsInterfaceId_t send_if_id = xps_if_id;
+    xpsInterfaceType_e if_type;
+    XP_STATUS status = XP_NO_ERR;
+
+    if (set) {
+        status = xpsInterfaceGetType(xps_if_id, &if_type);
+        if (status != XP_NO_ERR) {
+            VLOG_ERR("%s, Failed to get interface type. Error: %d", 
+                     __FUNCTION__, status);
+            return EPERM;
+        }
+
+        if (if_type != XPS_PORT) {
+            return 0;
+        }
+
+        status = xpsPortGetPortControlIntfId(xp_dev->id, xps_if_id,
+                                             &send_if_id);
+        if (status) {
+            VLOG_ERR("%s, Unable to get port control interface ID for "
+                     "interface: %u. Error: %d",
+                     __FUNCTION__, xps_if_id, status);
+            return EPERM;
+        }
+    }
+
+    status = xpsNetdevIfTxHeaderSet(xp_dev->id, xpnet_if_id, send_if_id, true);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("%s, Unable to set tx header for interface: %u",
+                 __FUNCTION__, xps_if_id);
+        return EPERM;
+    }
 
     return 0;
 }

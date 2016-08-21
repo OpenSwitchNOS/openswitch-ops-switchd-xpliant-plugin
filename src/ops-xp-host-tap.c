@@ -58,6 +58,7 @@ struct tap_if_entry {
     xpsInterfaceId_t send_if_id;
     int fd;
     char *name;
+    bool filter_created;
 };
 
 struct tap_info {
@@ -99,6 +100,9 @@ static int tap_if_filter_create(char *name, struct xpliant_dev *xp_dev,
                                 xpsInterfaceId_t xps_if_id,
                                 int host_if_id, int *host_filter_id);
 static int tap_if_filter_delete(struct xpliant_dev *xp_dev, int host_filter_id);
+static int tap_if_control_id_set(struct xpliant_dev *xp_dev,
+                                 xpsInterfaceId_t xps_if_id, 
+                                 int host_if_id, bool set);
 
 const struct xp_host_if_api xp_host_tap_api = {
     tap_init,
@@ -107,6 +111,7 @@ const struct xp_host_if_api xp_host_tap_api = {
     tap_if_delete,
     tap_if_filter_create,
     tap_if_filter_delete,
+    tap_if_control_id_set
 };
 
 static int
@@ -245,9 +250,11 @@ tap_if_create(struct xpliant_dev *xp_dev, char *name,
     *host_if_id = fd;
 
     if_entry = xzalloc(sizeof(*if_entry));
-    if_entry->if_id = XPS_INTF_INVALID_ID;
+    if_entry->if_id = xps_if_id;
+    if_entry->send_if_id = xps_if_id;
     if_entry->fd = fd;
     if_entry->name = xstrdup(tap_if_name);
+    if_entry->filter_created = false;
 
     ovs_mutex_lock(&info->mutex);
 
@@ -318,7 +325,6 @@ tap_if_filter_create(char *name, struct xpliant_dev *xp_dev,
 {
     struct tap_info *info;
     struct tap_if_entry *if_entry;
-    xpsInterfaceType_e if_type;
     XP_STATUS status = XP_NO_ERR;
 
     ovs_assert(xp_dev);
@@ -343,32 +349,15 @@ tap_if_filter_create(char *name, struct xpliant_dev *xp_dev,
         return ENOENT;
     }
 
-    if(if_entry->if_id != XPS_INTF_INVALID_ID)
+    if(if_entry->filter_created)
     {
         /* Filter already present */
         ovs_mutex_unlock(&info->mutex);
-        return ENOENT;
+        return 0;
     }
 
     *host_filter_id = xps_if_id + 1;
-
-    status = xpsInterfaceGetType(xps_if_id, &if_type);
-    if (status != XP_NO_ERR) {
-        VLOG_ERR("%s, Failed to get interface type. Error: %d", 
-                 __FUNCTION__, status);
-        return EPERM;
-    }
-
-    if_entry->if_id = if_entry->send_if_id = xps_if_id;
-
-    if (if_type == XPS_PORT) {
-        status = xpsPortGetPortControlIntfId(xp_dev->id, if_entry->if_id,
-                                             &if_entry->send_if_id);
-        if (status) {
-            VLOG_ERR("%s, Unable to get control interface ID for port: %u. ERR%u",
-                     __FUNCTION__, xps_if_id, status);
-        }
-    }
+    if_entry->filter_created = true;
 
     hmap_insert(&info->if_id_to_tap_if_map, &if_entry->if_id_node,
                 if_entry->if_id);
@@ -408,7 +397,71 @@ tap_if_filter_delete(struct xpliant_dev *xp_dev, int host_filter_id)
 
     hmap_remove(&info->if_id_to_tap_if_map, &if_entry->if_id_node);
 
-    if_entry->if_id = XPS_INTF_INVALID_ID;
+    if_entry->filter_created = false;
+
+    ovs_mutex_unlock(&info->mutex);
+
+    return 0;
+}
+
+static int
+tap_if_control_id_set(struct xpliant_dev *xp_dev,
+                      xpsInterfaceId_t xps_if_id, 
+                      int host_if_id, bool set)
+{
+    xpsInterfaceType_e if_type;
+    XP_STATUS status = XP_NO_ERR;
+    struct tap_info *info;
+    struct tap_if_entry *if_entry;
+
+    ovs_assert(xp_dev);
+    ovs_assert(xp_dev->host_if_info);
+
+    info = (struct tap_info *)xp_dev->host_if_info->data;
+    if (!info) {
+        VLOG_ERR("Host IF not initialized for %d device.", xp_dev->id);
+        return EFAULT;
+    }
+
+    if (host_if_id <= 0) {
+        VLOG_ERR("Invalid TAP interface ID %d specified.", host_if_id);
+        return EINVAL;
+    }
+
+    ovs_mutex_lock(&info->mutex);
+
+    if_entry = tap_get_if_entry_by_fd(info, host_if_id);
+    if (!if_entry) {
+        ovs_mutex_unlock(&info->mutex);
+        return ENOENT;
+    }
+
+    if (set) {
+        status = xpsInterfaceGetType(xps_if_id, &if_type);
+        if (status != XP_NO_ERR) {
+            ovs_mutex_unlock(&info->mutex);
+            VLOG_ERR("%s, Failed to get interface type. Error: %d", 
+                     __FUNCTION__, status);
+            return EPERM;
+        }
+
+        if (if_type != XPS_PORT) {
+            ovs_mutex_unlock(&info->mutex);
+            return 0;
+        }
+
+        status = xpsPortGetPortControlIntfId(xp_dev->id, xps_if_id,
+                                             &if_entry->send_if_id);
+        if (status) {
+            ovs_mutex_unlock(&info->mutex);
+            VLOG_ERR("%s, Unable to get port control interface ID for "
+                     "interface: %u. Error: %d",
+                     __FUNCTION__, xps_if_id, status);
+            return EPERM;
+        }
+    } else {
+        if_entry->send_if_id = xps_if_id;
+    }
 
     ovs_mutex_unlock(&info->mutex);
 
@@ -519,7 +572,7 @@ tap_listener(void *arg)
                 ovs_mutex_lock(&info->mutex);
                 /* Figure out egress interface ID. */
                 if_entry = tap_get_if_entry_by_fd(info, i);
-                if (!if_entry || (if_entry->if_id == XPS_INTF_INVALID_ID)) {
+                if (!if_entry || !if_entry->filter_created) {
                     ovs_mutex_unlock(&info->mutex);
                     continue;
                 }

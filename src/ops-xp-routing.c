@@ -89,13 +89,6 @@ ops_xp_l3_mgr_create(xpsDevice_t devId)
 
     mgr->dbg = xzalloc(sizeof(xp_l3_dbg_t));
 
-    /* Enable L3 Host table lookup */
-    status = xpsL3SetIpv4HostLookupEnable(devId, true);
-    if (status != XP_NO_ERR) {
-        VLOG_ERR("%s: Failed to enable IPv4 host lookup."
-                 "Error code: %d\n", __FUNCTION__, status);
-    }
-
     return mgr;
 }
 
@@ -358,7 +351,7 @@ ops_xp_routing_delete_host_entry(struct ofproto_xpliant *ofproto,
                                  int *l3_egress_id)
 {
     XP_STATUS status;
-    xpsL3HostEntry_t host_entry;
+    xpIpPrefixType_t host_entry_type;
     struct hmap_node *node;
     xp_l3_mgr_t *l3_mgr;
     xp_host_entry_t *e;
@@ -387,14 +380,13 @@ ops_xp_routing_delete_host_entry(struct ofproto_xpliant *ofproto,
         hmap_remove(&l3_mgr->host_map, &e->hmap_node);
     }
 
-    memset(&host_entry, 0, sizeof(host_entry));
-    host_entry.type = e->is_ipv6_addr ? XP_PREFIX_TYPE_IPV6 : XP_PREFIX_TYPE_IPV4;
+    host_entry_type = e->is_ipv6_addr ? XP_PREFIX_TYPE_IPV6 : XP_PREFIX_TYPE_IPV4;
 
     host_entry_free(l3_mgr, e);
 
     /* Remove Host Entry from the HW */
     status = xpsL3RemoveIpHostEntryByIndex(ofproto->xpdev->id, (uint32_t)index,
-                                           &host_entry);
+                                           host_entry_type);
     ovs_mutex_unlock(&l3_mgr->mutex);
 
     if (status != XP_NO_ERR) {

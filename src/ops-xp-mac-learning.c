@@ -245,7 +245,7 @@ ops_xp_mac_learning_unref(struct xp_mac_learning *ml)
         xpthread_join(ml->ml_thread, NULL);
 #endif /* OPS_XP_ML_EVENT_PROCESSING */
 
-        ops_xp_mac_learning_flush(ml);
+        ops_xp_mac_learning_flush(ml, false);
         hmap_destroy(&ml->table);
 
 #ifdef OPS_XP_ML_EVENT_PROCESSING
@@ -486,7 +486,7 @@ ops_xp_mac_learning_expire(struct xp_mac_learning *ml, struct xp_mac_entry *e)
  * is responsible for revalidating any flows that depend on 'ml', if
  * necessary. */
 void
-ops_xp_mac_learning_flush(struct xp_mac_learning *ml)
+ops_xp_mac_learning_flush(struct xp_mac_learning *ml, bool dynamic_only)
 {
     struct xp_mac_entry *e = NULL;
     struct xp_mac_entry *next = NULL;
@@ -494,7 +494,9 @@ ops_xp_mac_learning_flush(struct xp_mac_learning *ml)
     ovs_assert(ml);
 
     HMAP_FOR_EACH_SAFE (e, next, hmap_node, &ml->table) {
-        ops_xp_mac_learning_expire(ml, e);
+        if (!dynamic_only || !e->xps_fdb_entry.isStatic) {
+            ops_xp_mac_learning_expire(ml, e);
+        }
     }
 }
 
@@ -684,7 +686,7 @@ ops_xp_mac_learning_age_by_vlan_and_mac(struct xp_mac_learning *ml,
  * from the software and hardware FDB tables. */
 int
 ops_xp_mac_learning_flush_intfId(struct xp_mac_learning *ml,
-                                 xpsInterfaceId_t  intfId)
+                                 xpsInterfaceId_t intfId, bool dynamic_only)
 {
     struct xp_mac_entry *e = NULL;
     struct xp_mac_entry *next = NULL;
@@ -692,7 +694,9 @@ ops_xp_mac_learning_flush_intfId(struct xp_mac_learning *ml,
     ovs_assert(ml);
 
     HMAP_FOR_EACH_SAFE (e, next, hmap_node, &ml->table) {
-        if (e->xps_fdb_entry.intfId == intfId) {
+        if ((e->xps_fdb_entry.intfId == intfId) &&
+            (!dynamic_only || !e->xps_fdb_entry.isStatic)) {
+
             ops_xp_mac_learning_expire(ml, e);
         }
     }
@@ -705,9 +709,8 @@ ops_xp_mac_learning_flush_intfId(struct xp_mac_learning *ml,
  * hardware FDB tables. */
 int
 ops_xp_mac_learning_process_port_down(struct xp_mac_learning *ml,
-                                      xpsInterfaceId_t  intfId)
-{
-    return ops_xp_mac_learning_flush_intfId(ml, intfId);
+                                      xpsInterfaceId_t intfId) {
+    return ops_xp_mac_learning_flush_intfId(ml, intfId, true);
 }
 
 
@@ -1051,7 +1054,11 @@ ops_xp_mac_learning_dump_table(struct xp_mac_learning *ml, struct ds *d_str)
     ovs_assert(ml);
     ovs_assert(d_str);
 
-    ds_put_cstr(d_str, " port    VLAN  MAC                index\n");
+    ds_put_cstr(d_str, "-----------------------------------------------\n");
+    ds_put_format(d_str, "MAC age-time : %d seconds\n", ml->idle_time);
+    ds_put_format(d_str, "Number of MAC addresses : %d\n", hmap_count(&ml->table));
+    ds_put_cstr(d_str, "-----------------------------------------------\n");
+    ds_put_cstr(d_str, "Port     VLAN  MAC               Type     Index\n");
 
     HMAP_FOR_EACH(e, hmap_node, &ml->table) {
         if (e) {
@@ -1064,10 +1071,11 @@ ops_xp_mac_learning_dump_table(struct xp_mac_learning *ml, struct ds *d_str)
                 continue;
             }
 
-            ds_put_format(d_str, "%-8s %4d  "XP_ETH_ADDR_FMT"  0x%lx\n",
+            ds_put_format(d_str, "%-8s %4d  "XP_ETH_ADDR_FMT" %s  0x%lx\n",
                           iface_name,
-                          e->xps_fdb_entry.vlanId, 
+                          e->xps_fdb_entry.vlanId,
                           XP_ETH_ADDR_ARGS(e->xps_fdb_entry.macAddr),
+                          (e->xps_fdb_entry.isStatic ? "static " : "dynamic"),
                           e->hmap_node.hash);
             free(iface_name);
         }

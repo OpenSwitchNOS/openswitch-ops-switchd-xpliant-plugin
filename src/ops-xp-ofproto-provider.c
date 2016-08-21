@@ -984,7 +984,7 @@ bundle_flush_macs(struct bundle_xpliant *bundle)
     VLOG_INFO("bundle_flush_macs");
 
     ovs_rwlock_wrlock(&ml->rwlock);
-    ops_xp_mac_learning_flush_intfId(ml, bundle->intfId);
+    ops_xp_mac_learning_flush_intfId(ml, bundle->intfId, false);
     ovs_rwlock_unlock(&ml->rwlock);
 }
 
@@ -2547,23 +2547,23 @@ xp_unixctl_fdb_flush(struct unixctl_conn *conn, int argc OVS_UNUSED,
                      const char *argv[] OVS_UNUSED, void *aux OVS_UNUSED)
 {
     struct ofproto_xpliant *ofproto;
+    const char *fdb_type_s = argc > 1 ? argv[2] : "dynamic";
+    bool dynamic_only = true;;
 
-    if (argc > 1) {
-        ofproto = ops_xp_ofproto_lookup(argv[1]);
-        if (!ofproto) {
-            unixctl_command_reply_error(conn, "no such bridge");
-            return;
-        }
-        ovs_rwlock_wrlock(&ofproto->ml->rwlock);
-        ops_xp_mac_learning_flush(ofproto->ml);
-        ovs_rwlock_unlock(&ofproto->ml->rwlock);
-    } else {
-        HMAP_FOR_EACH (ofproto, all_ofproto_xpliant_node, &all_ofproto_xpliant) {
-            ovs_rwlock_wrlock(&ofproto->ml->rwlock);
-            ops_xp_mac_learning_flush(ofproto->ml);
-            ovs_rwlock_unlock(&ofproto->ml->rwlock);
-        }
+    ofproto = ops_xp_ofproto_lookup(argv[1]);
+    if (!ofproto) {
+        unixctl_command_reply_error(conn, "no such bridge");
+        return;
     }
+
+    /* Get entry type. */
+    if (STR_EQ(fdb_type_s, "all")) {
+        dynamic_only = false;
+    }
+
+    ovs_rwlock_wrlock(&ofproto->ml->rwlock);
+    ops_xp_mac_learning_flush(ofproto->ml, dynamic_only);
+    ovs_rwlock_unlock(&ofproto->ml->rwlock);
 
     unixctl_command_reply(conn, "table successfully flushed");
 }
@@ -3004,13 +3004,14 @@ ofproto_xpliant_unixctl_init(void)
     unixctl_command_register("xp/shell/stop", "", 0, 0,
                              unixctl_shell_stop, NULL);
 
-    unixctl_command_register("xp/fdb/flush", "[bridge]", 0, 1,
-                            xp_unixctl_fdb_flush, NULL);
+    unixctl_command_register("xp/fdb/flush", "bridge [dynamic|all]", 1, 2,
+                             xp_unixctl_fdb_flush, NULL);
     unixctl_command_register("xp/fdb/show", "bridge", 1, 1,
-                            xp_unixctl_fdb_show, NULL);
+                             xp_unixctl_fdb_show, NULL);
     unixctl_command_register("xp/fdb/hw-dump", "bridge", 1, 1,
-                            xp_unixctl_fdb_hw_dump, NULL);
-    unixctl_command_register("xp/fdb/add-entry", "bridge port vlan mac [type]",
+                             xp_unixctl_fdb_hw_dump, NULL);
+    unixctl_command_register("xp/fdb/add-entry",
+                             "bridge port vlan mac [dynamic]",
                              4, 5, xp_unixctl_fdb_add_entry, NULL);
     unixctl_command_register("xp/fdb/remove-entry", "bridge vlan mac",
                              3, 3, xp_unixctl_fdb_remove_entry, NULL);

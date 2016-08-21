@@ -25,14 +25,14 @@ class myTopo( Topo ):
     '''
         Custom Topology Example
 
-        [h1-eth0]---[3]
+        [h1-eth0]---[4]
                       S1
-                    [1][2]
-                     |  |
-                     |  |
-                    [1][2]
+                   [1][2][3]
+                    |  |  |
+                    |  |  |
+                   [1][2][3]
                       S2
-        [h2-eth0]---[3]
+        [h2-eth0]---[4]
  
     '''
 
@@ -49,6 +49,7 @@ class myTopo( Topo ):
             switch = self.addSwitch('s%s' %s)
 
         # Add links between nodes based on custom topo
+        self.addLink('s1', 's2')
         self.addLink('s1', 's2')
         self.addLink('s1', 's2')
         self.addLink('h1', 's1')
@@ -108,7 +109,50 @@ def checkLacpPartner(output):
            return False
 
    return True
-      
+
+def checkStpState(output, isRoot):
+    buf = output.strip().split('------------ -------------- ---------- ------- ---------- ----------\n')
+    portStatusBuf = buf[1].split('\n')[:4]
+
+    if (isRoot == True):
+      # Check state of root bridge
+      if ("This bridge is the root" not in buf[0]):
+        return False
+
+      for i in portStatusBuf:
+          # Remove extra spaces between fields
+          i = re.sub('\s+',' ', i)
+          portStatus = i.split(' ')
+        
+          if (portStatus[1] != "Designated") or (portStatus[2] != "Forwarding"):
+              # On root bridge all ports should be designated and forwarding
+              return False
+    else:
+        # Check state of slave bridge
+        if ("This bridge is the root" in buf[0]):
+            return False
+
+        rootFound = False
+
+        for i in portStatusBuf:
+            # Remove extra spaces between fields
+            row = re.sub('\s+',' ', i)
+            portStatus = row.split(' ')
+
+            if (i != portStatusBuf[-1]):
+                # Check states on ports connected to other switch
+                if (portStatus[1] == "Root"):
+                    if (rootFound == True) or (portStatus[2] != "Forwarding"):
+                        # Only one port can have "Root" role and state "Forwarding"
+                        return False
+                    rootFound = True
+                elif (portStatus[1] != "Alternate") or (portStatus[2] != "Blocking"):
+                    return False
+            else:
+                # Last port is connected to host so it should be forwarding
+                if (portStatus[1] != "Designated") or (portStatus[2] != "Forwarding"):
+                    return False
+    return True
 
 class xpSimTest( OpsVsiTest ):
 
@@ -121,14 +165,14 @@ class xpSimTest( OpsVsiTest ):
                            controller=None, build=True)
 
         info("\n")
-        info("    [h1-eth0]---[3]        \n")
+        info("    [h1-eth0]---[4]        \n")
         info("                  S1       \n")
-        info("                [1][2]     \n")
-        info("                 |  |      \n")
-        info("                 |  |      \n")
-        info("                [1][2]     \n")
+        info("               [1][2][3]   \n")
+        info("                |  |  |    \n")
+        info("                |  |  |    \n")
+        info("               [1][2][3]   \n")
         info("                  S2       \n")
-        info("    [h2-eth0]---[3]        \n")
+        info("    [h2-eth0]---[4]        \n")
 
 
     def net_provision(self):
@@ -139,7 +183,7 @@ class xpSimTest( OpsVsiTest ):
         i = 1 
         for s in self.net.switches:
             s.cmdCLI("configure terminal")
-            for intf in range (1, 4):
+            for intf in range (1, 5):
                 vlanId = intf * 100
                 s.cmdCLI("vlan %d" %vlanId)
                 s.cmdCLI("no shutdown")
@@ -174,6 +218,38 @@ class xpSimTest( OpsVsiTest ):
 
             s.cmdCLI("exit")
 
+    def stp(self):
+        i = 1
+        for s in self.net.switches:
+            info("### Configuring STP on switch %d... ###\n" %i)
+        
+            s.cmdCLI("configure terminal")
+
+            if (i == 1):
+              # Set teh lowest STP priority for switch 1 so it will become a root
+              s.cmdCLI("spanning-tree priority 1")
+
+            s.cmdCLI("spanning-tree")
+            s.cmdCLI("exit")
+            i += 1
+
+        # Sleep for a while. This should be enough for successful 
+        # exchange of LLDP frames.
+        info("Sleep 30\n")
+        time.sleep(30)
+
+        s1 = self.net.switches[ 0 ]
+        s2 = self.net.switches[ 1 ]
+
+        out = s1.cmdCLI("show spanning-tree")
+        status = checkStpState(out, True)
+        assert (status == True), "Wrong STP state on root switch 1"
+        info("### STP state on root switch 1 is correct\n")        
+        
+        out = s2.cmdCLI("show spanning-tree")
+        status = checkStpState(out, False)
+        assert (status == True), "Wrong STP state on slave switch 2"
+        info("### STP state on slave switch 2 is correct\n") 
 
     def lldp(self):
         i = 1
@@ -181,21 +257,18 @@ class xpSimTest( OpsVsiTest ):
             info("### Configuring LLDP on switch %d... ###\n" %i)
         
             s.cmdCLI("configure terminal")
+            s.cmdCLI("no spanning-tree")
         
             # Configure global lldp settings
             s.cmdCLI("lldp enable")
             s.cmdCLI("lldp timer 5")
 
             # Configure per-interface lldp settings
-            s.cmdCLI("interface 1")
-            s.cmdCLI("lldp transmission")
-            s.cmdCLI("lldp reception")
-            s.cmdCLI("exit")
-
-            s.cmdCLI("interface 2")
-            s.cmdCLI("lldp transmission")
-            s.cmdCLI("lldp reception")
-            s.cmdCLI("exit")
+            for intf in range (1, 4):
+                s.cmdCLI("interface %d" %intf)
+                s.cmdCLI("lldp transmission")
+                s.cmdCLI("lldp reception")
+                s.cmdCLI("exit")
 
             s.cmdCLI("exit")
             i += 1
@@ -209,15 +282,12 @@ class xpSimTest( OpsVsiTest ):
         
         for s in self.net.switches:
             # Check lldp status 
-            out = s.cmdCLI("show lldp neighbor-info 1")
-            status = checkLldpNeighbour(out)
-            assert (status == True), "LLDP neigbour not discovered on port 1 of switch %d" %i
-            info("### LLDP neighbour discovered on port 1 of switch %d ###\n" %i)
+            for intf in range (1, 4):
+                out = s.cmdCLI("show lldp neighbor-info %d" %intf)
+                status = checkLldpNeighbour(out)
+                assert (status == True), "LLDP neigbour not discovered on port %d of switch %d" % (intf, i)
+                info("### LLDP neighbour discovered on port %d of switch %d ###\n" % (intf, i))
 
-            out = s.cmdCLI("show lldp neighbor-info 2")
-            status = checkLldpNeighbour(out)
-            assert (status == True), "LLDP neigbour not found on port 2 of switch %d" %i
-            info("### LLDP neighbour discovered on port 2 of switch %d ###\n" %i)
             i += 1
 
     def static_lag(self):
@@ -240,7 +310,7 @@ class xpSimTest( OpsVsiTest ):
             s.cmdCLI("vlan access 300")
             s.cmdCLI("exit")
 
-            for intf in range (1, 3):
+            for intf in range (1, 4):
                 s.cmdCLI("interface %d" %intf)
                 s.cmdCLI("lag 1")
                 s.cmdCLI("exit")
@@ -266,16 +336,13 @@ class xpSimTest( OpsVsiTest ):
             s.cmdCLI("ip address 10.10.10.%d/24" %i)
             s.cmdCLI("exit")
 
-            for intf in range (1, 3):
+            for intf in range (1, 4):
                 s.cmdCLI("interface %d" %intf)
                 s.cmdCLI("lag 1")
                 s.cmdCLI("exit")
 
             s.cmdCLI("exit")
             i += 1
-
-        #info("Sleep 60\n")
-        #time.sleep(60)
 
         s1 = self.net.switches[ 0 ]
         s2 = self.net.switches[ 1 ]
@@ -299,7 +366,7 @@ class xpSimTest( OpsVsiTest ):
 
         i = 1
         for s in self.net.switches:
-            info("### Configuring dynamic LAG with ports 1,2 on switch %d... ###\n" %i)
+            info("### Configuring dynamic LAG with ports 1-3 on switch %d... ###\n" %i)
             s.cmdCLI("configure terminal")
             s.cmdCLI("interface lag 1")
             s.cmdCLI("no routing")
@@ -338,23 +405,28 @@ class Test_switchd_xpliant_p2p:
         Test_switchd_xpliant_p2p.test.net_provision()
 
     # TC_1
-    def test_switchd_xpliant_lldp(self):
+    def test_switchd_xpliant_stp(self):
         info("\n\n########## Test Case 1 ##########\n")
-        self.test.lldp()
+        self.test.stp()
 
     # TC_2
-    def test_switchd_xpliant_static_lag(self):
+    def test_switchd_xpliant_lldp(self):
         info("\n\n########## Test Case 2 ##########\n")
-        self.test.static_lag()
+        self.test.lldp()
 
     # TC_3
-    def test_switchd_xpliant_static_lag_l3(self):
+    def test_switchd_xpliant_static_lag(self):
         info("\n\n########## Test Case 3 ##########\n")
-        self.test.static_lag_l3()
+        self.test.static_lag()
 
     # TC_4
-    def test_switchd_xpliant_dynamic_lag(self):
+    def test_switchd_xpliant_static_lag_l3(self):
         info("\n\n########## Test Case 4 ##########\n")
+        self.test.static_lag_l3()
+
+    # TC_5
+    def test_switchd_xpliant_dynamic_lag(self):
+        info("\n\n########## Test Case 5 ##########\n")
         self.test.dynamic_lag()
 
     def teardown_class(cls):

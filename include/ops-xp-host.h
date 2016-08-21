@@ -50,6 +50,9 @@ struct xp_host_if_api {
                             int xpnet_if_id, int *xpnet_filter_id);
     int (*if_filter_delete)(struct xpliant_dev *xp_dev,
                             int xpnet_filter_id);
+    int (*if_control_id_set)(struct xpliant_dev *xp_dev,
+                             xpsInterfaceId_t xps_if_id, 
+                             int xpnet_if_id, bool set);
 };
 
 struct xp_host_if_info {
@@ -68,5 +71,8 @@ void ops_xp_host_port_filter_create(char *name, struct xpliant_dev *xp_dev,
                                     int xpnet_if_id, int *xpnet_filter_id);
 void ops_xp_host_filter_delete(char *name, struct xpliant_dev *xp_dev,
                                int xpnet_filter_id);
+int ops_xp_host_port_control_if_id_set(struct xpliant_dev *xp_dev,
+                                       xpsInterfaceId_t xps_if_id,
+                                       int xpnet_if_id, bool set);
 
 #endif /* ops-xp-host.h */
