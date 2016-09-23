@@ -34,9 +34,11 @@
 #include <openswitch-idl.h>
 #include <openswitch-dflt.h>
 #include "sset.h"
+#include "socket-util.h"
 #include "ops-xp-dev-init.h"
 #include "ops-xp-util.h"
 #include "ops-xp-host.h"
+#include "ops-xp-qos.h"
 #include "ops-xp-vlan.h"
 #include "ops-xp-mac-learning.h"
 #include "openXpsMac.h"
@@ -44,15 +46,8 @@
 #include "openXpsPolicer.h"
 #include "openXpsPort.h"
 
-#ifdef closesocket
-#undef closesocket
-#endif
-#include "socket-util.h"
-
 
 VLOG_DEFINE_THIS_MODULE(xp_netdev);
-
-#define XP_DEFAULT_MAC_MODE             MAC_MODE_4X10GB
 
 
 /* Temporary definition. Will be removed when functionality which allows
@@ -74,7 +69,6 @@ static struct vlog_rate_limit poll_rl = VLOG_RATE_LIMIT_INIT(5, 20);
 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
 
 static int netdev_xpliant_construct(struct netdev *);
-static int netdev_xpliant_internal_construct(struct netdev *netdev_);
 
 static struct xpdev_queue *xpdev_find_queue(const struct netdev_xpliant *xpdev,
                                             unsigned int queue_id);
@@ -93,8 +87,7 @@ static struct ovs_list xp_netdev_list OVS_GUARDED_BY(xp_netdev_list_mutex)
 bool
 is_xpliant_class(const struct netdev_class *class)
 {
-    return (class->construct == netdev_xpliant_construct) ||
-        (class->construct == netdev_xpliant_internal_construct);
+    return (class->construct == netdev_xpliant_construct);
 }
 
 struct netdev_xpliant *
@@ -119,7 +112,8 @@ ops_xp_netdev_from_port_num(uint32_t dev_id, uint32_t port_id)
 
     ovs_mutex_lock(&xp_netdev_list_mutex);
     LIST_FOR_EACH(netdev, list_node, &xp_netdev_list) {
-        if ((netdev->xpdev->id == dev_id) &&
+        if ((netdev->xpdev != NULL) &&
+            (netdev->xpdev->id == dev_id) &&
             (netdev->port_num == port_id)) {
 
             /* If the port is splittable, and it is
@@ -165,7 +159,7 @@ netdev_xpliant_construct(struct netdev *netdev_)
     netdev->intf_initialized = false;
 
     netdev->port_num = XP_MAX_TOTAL_PORTS;
-    netdev->xpdev = ops_xp_dev_by_id(0);
+    netdev->xpdev = NULL;
     memset(&(netdev->pcfg), 0x0, sizeof(struct port_cfg));
     netdev->flags = 0;
     netdev->link_status = false;
@@ -186,6 +180,8 @@ netdev_xpliant_construct(struct netdev *netdev_)
 
     netdev->xpnet_if_id = 0;
     netdev->xpnet_port_filter_id = 0;
+
+    netdev->tap_fd = 0;
 
     n = atomic_count_inc(&next_n);
     netdev->hwaddr[0] = 0xaa;
@@ -213,13 +209,21 @@ netdev_xpliant_destruct(struct netdev *netdev_)
 
     ovs_mutex_lock(&xp_netdev_list_mutex);
 
+    if (netdev->subintf_parent_name != NULL) {
+        free(netdev->subintf_parent_name);
+    }
+
     if (netdev->xpnet_if_id) {
         retval = ops_xp_host_if_delete(netdev->xpdev, netdev->xpnet_if_id);
 
         if (retval) {
             VLOG_ERR("Failed to delete kernel XPNET interface %s",
-                     netdev->up.name);
+                     netdev_get_name(&(netdev->up)));
         }
+    }
+
+    if (netdev->tap_fd > 0) {
+        close(netdev->tap_fd);
     }
 
     list_remove(&netdev->list_node);
@@ -233,10 +237,6 @@ static void
 netdev_xpliant_dealloc(struct netdev *netdev_)
 {
     struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
-
-    if (netdev->subintf_parent_name != NULL) {
-        free(netdev->subintf_parent_name);
-    }
 
     free(netdev);
 }
@@ -322,25 +322,12 @@ netdev_xpliant_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
         if (NULL == port_info) {
             VLOG_ERR("Unable to get port info struct for "
                      "Interface=%s, devId=%d, port_num=%d",
-                     netdev->up.name, netdev->xpdev->id, netdev->port_num);
+                     netdev_get_name(&(netdev->up)), netdev->xpdev->id, netdev->port_num);
             goto error;
         }
 
         /* Save the port_info porinter in netdev struct. */
         netdev->port_info = port_info;
-
-        /* Save the hardware unit & port number in port_info struct. */
-        port_info->id = netdev->xpdev->id;
-        port_info->port_num = netdev->port_num;
-        port_info->name = xstrdup(netdev->up.name);
-        port_info->hw_enable = false;
-        port_info->port_mac_mode = MAC_MODE_MAX_VAL;
-        port_info->serdes_tuned = false;
-
-        XP_LOCK();
-        status = xpsIsPortInited(netdev->xpdev->id, netdev->port_num);
-        XP_UNLOCK();
-        port_info->initialized = (status == XP_PORT_NOT_INITED) ? false : true;
 
         /* For all the ports that can be split into multiple
          * subports, 'split_4' property is set to true.
@@ -348,8 +335,6 @@ netdev_xpliant_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
         if (STR_EQ(is_splittable, INTERFACE_HW_INTF_INFO_MAP_SPLIT_4_TRUE)) {
             netdev->is_split_parent = true;
             port_info->split_port_count = XP_MAX_CHAN_PER_MAC;
-            /* Assign default port MAC mode */
-            port_info->port_mac_mode = XP_DEFAULT_MAC_MODE;
         } else {
             /* For all the split children ports 'split_parent'
              * property is set to the name of the parent port.
@@ -371,16 +356,13 @@ netdev_xpliant_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
                 } else {
                     VLOG_ERR("Unable to find the netdev for the parent port. "
                              "intf_name=%s parent_name=%s",
-                             netdev->up.name, split_parent);
+                             netdev_get_name(&(netdev->up)), split_parent);
                     goto error;
                 }
-            } else {
-                /* Port is not splittable */
-                port_info->port_mac_mode = MAC_MODE_4X10GB;
             }
         }
 
-        /* Add the port to the default VLAN. This will allow it to trap LACP 
+        /* Add the port to the default VLAN. This will allow it to trap LACP
          * frames in case it becomes member of a dynamic LAG.*/
         rc = ops_xp_vlan_member_add(netdev->xpdev->vlan_mgr,
                                     XP_DEFAULT_VLAN_ID, netdev->ifId,
@@ -391,12 +373,11 @@ netdev_xpliant_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
                      XP_DEFAULT_VLAN_ID, rc);
         }
 
-        rc = ops_xp_host_if_create(netdev->xpdev, netdev->up.name,
-                                   netdev->ifId, ether_mac,
-                                   &netdev->xpnet_if_id);
+        rc = ops_xp_host_if_create(netdev->xpdev, (char *)netdev_get_name(&(netdev->up)),
+                                   netdev->ifId, ether_mac, &netdev->xpnet_if_id);
 
         if (rc) {
-            VLOG_ERR("Failed to initialize interface %s", netdev->up.name);
+            VLOG_ERR("Failed to initialize interface %s", netdev_get_name(&(netdev->up)));
         } else {
             netdev->intf_initialized = true;
         }
@@ -484,12 +465,13 @@ static void
 handle_xp_host_port_filters(struct netdev_xpliant *netdev, int enable)
 {
     if ((enable == true) && (netdev->xpnet_port_filter_id == 0)) {
-        ops_xp_host_port_filter_create(netdev->up.name, netdev->xpdev,
-                                       netdev->ifId, netdev->xpnet_if_id,
+        ops_xp_host_port_filter_create((char *)netdev_get_name(&(netdev->up)),
+                                       netdev->xpdev, netdev->ifId,
+                                       netdev->xpnet_if_id,
                                        &netdev->xpnet_port_filter_id);
     } else if ((enable == false) && (netdev->xpnet_port_filter_id != 0)) {
-        ops_xp_host_filter_delete(netdev->up.name, netdev->xpdev,
-                                  netdev->xpnet_port_filter_id);
+        ops_xp_host_filter_delete((char *)netdev_get_name(&(netdev->up)),
+                                  netdev->xpdev, netdev->xpnet_port_filter_id);
         netdev->xpnet_port_filter_id = 0;
     }
 }
@@ -543,7 +525,7 @@ netdev_xpliant_set_hw_intf_config(struct netdev *netdev_, const struct smap *arg
 
     if (netdev->intf_initialized == false) {
         VLOG_WARN("%s: netdev interface %s is not initialized.",
-                  __FUNCTION__, netdev->up.name);
+                  __FUNCTION__, netdev_get_name(&(netdev->up)));
         return EPERM;
     }
 
@@ -570,7 +552,7 @@ netdev_xpliant_set_hw_intf_config(struct netdev *netdev_, const struct smap *arg
     }
 
     VLOG_INFO("Intf=%s, port=%d config is changed",
-              netdev->up.name, netdev->port_num);
+              netdev_get_name(&(netdev->up)), netdev->port_num);
 
     ovs_mutex_lock(&netdev->mutex);
 
@@ -594,7 +576,7 @@ netdev_xpliant_set_hw_intf_config(struct netdev *netdev_, const struct smap *arg
     /* Apply port configuration */
     rc = ops_xp_port_set_config(netdev, &pcfg);
     if (rc) {
-        VLOG_WARN("Failed to configure netdev interface %s.", netdev->up.name);
+        VLOG_WARN("Failed to configure netdev interface %s.", netdev_get_name(&(netdev->up)));
     }
 
     netdev_change_seq_changed(netdev_);
@@ -644,21 +626,13 @@ netdev_xpliant_get_etheraddr(const struct netdev *netdev_,
 }
 
 static int
-netdev_xpliant_get_mtu(const struct netdev *netdev, int *mtup)
+netdev_xpliant_get_mtu(const struct netdev *netdev_, int *mtup)
 {
-    XP_STATUS ret = XP_NO_ERR;
-    struct netdev_xpliant *dev = netdev_xpliant_cast(netdev);
+    struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
 
-    XP_LOCK();
-    ret = xpsMacGetRxMaxFrmLen(dev->xpdev->id, dev->port_num,
-                               (uint16_t *)mtup);
-    XP_UNLOCK();
-
-    if (ret != XP_NO_ERR) {
-        VLOG_WARN("unable to get MTU on %s. RC = %u",
-                  netdev_get_name(netdev), ret);
-        return EPERM;
-    }
+    ovs_mutex_lock(&netdev->mutex);
+    *mtup = netdev->pcfg.mtu;
+    ovs_mutex_unlock(&netdev->mutex);
 
     return 0;
 }
@@ -703,6 +677,12 @@ netdev_xpliant_update_flags(struct netdev *netdev_,
     }
 
     ovs_mutex_lock(&netdev->mutex);
+    /* Check for if netdev is enabled  */
+    if (netdev->pcfg.enable == false) {
+        /* Skip disabled netdev */
+        ovs_mutex_unlock(&netdev->mutex);
+        return EOPNOTSUPP;
+    }
 
     /* Get the current state to update the old flags. */
     rc = ops_xp_port_get_enable(netdev->xpdev->id, netdev->port_num, &state);
@@ -734,14 +714,16 @@ netdev_xpliant_get_stats(const struct netdev *netdev_,
 {
     struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
     struct xp_Statistics xpStat;
-    uint8_t link = 0;
+    int rc = 0;
     XP_STATUS ret = XP_NO_ERR;
 
     memset(stats, 0xFF, sizeof(*stats));
 
+    ovs_mutex_lock(&netdev->mutex);
     /* Check for if netdev is enabled  */
     if (netdev->pcfg.enable == false) {
         /* Skip disabled netdev */
+        ovs_mutex_unlock(&netdev->mutex);
         return 0;
     }
 
@@ -752,25 +734,26 @@ netdev_xpliant_get_stats(const struct netdev *netdev_,
             &xpStat);
     XP_UNLOCK();
 #endif
-
     if (ret != XP_NO_ERR) {
         VLOG_WARN("unable to get stats on %s. RC = %u",
                   netdev_get_name(netdev_), ret);
-        return EOPNOTSUPP;
+        rc = EOPNOTSUPP;
+    } else {
+        stats->rx_packets = xpStat.frameRxAll;
+        stats->tx_packets = xpStat.frameTransmittedAll;
+        stats->rx_bytes = xpStat.octetsRx;
+        stats->tx_bytes = xpStat.octetsTransmittedTotal;
+        stats->rx_errors = xpStat.frameRxAnyErr;
+        stats->tx_errors = xpStat.frameTransmittedWithErr;
+        stats->multicast = xpStat.frameRxMulticastAddr;
+        stats->rx_length_errors = xpStat.frameRxLengthErr;
+        stats->rx_crc_errors = xpStat.frameRxFcsErr;
+        stats->rx_fifo_errors = xpStat.frameDroppedFromRxFIFOFullCondition;
     }
 
-    stats->rx_packets = xpStat.frameRxAll;
-    stats->tx_packets = xpStat.frameTransmittedAll;
-    stats->rx_bytes = xpStat.octetsRx;
-    stats->tx_bytes = xpStat.octetsTransmittedTotal;
-    stats->rx_errors = xpStat.frameRxAnyErr;
-    stats->tx_errors = xpStat.frameTransmittedWithErr;
-    stats->multicast = xpStat.frameRxMulticastAddr;
-    stats->rx_length_errors = xpStat.frameRxLengthErr;
-    stats->rx_crc_errors = xpStat.frameRxFcsErr;
-    stats->rx_fifo_errors = xpStat.frameDroppedFromRxFIFOFullCondition;
+    ovs_mutex_unlock(&netdev->mutex);
 
-    return 0;
+    return rc;
 }
 
 static int
@@ -855,7 +838,7 @@ netdev_xpliant_set_policing(struct netdev *netdev, unsigned int kbits_rate,
     XP_STATUS ret = XP_NO_ERR;
 
     XP_LOCK();
-   
+
     polEntry.pbs = kbits_burst;
     polEntry.pir = kbits_rate;
     polEntry.cbs = kbits_burst;
@@ -867,7 +850,7 @@ netdev_xpliant_set_policing(struct netdev *netdev, unsigned int kbits_rate,
     polEntry.updateResultYellow = 0;
     polEntry.updateResultRed = 0;
     polEntry.polResult = 0;
-    
+
     ret = xpsPolicerAddPortPolicingEntry(dev->ifId, XP_ACM_POLICING, &polEntry);
 
     XP_UNLOCK();
@@ -971,9 +954,9 @@ netdev_xpliant_set_queue(struct netdev *netdev,
     XP_TRACE();
 
     XP_LOCK();
- 
+
     ret = xpsQosFcSetPfcPriority(dev->xpdev->id, dev->port_num, queue_id,
-                  priority);
+                                 priority);
 
     XP_UNLOCK();
 
@@ -1051,28 +1034,87 @@ netdev_xpliant_delete_queue(struct netdev *netdev, unsigned int queue_id)
 }
 
 static int
-netdev_xpliant_get_queue_stats(const struct netdev *netdev,
+netdev_xpliant_get_queue_stats(const struct netdev *netdev_,
                                unsigned int queue_id,
                                struct netdev_queue_stats *stats)
 {
-    int ret = 0;
-    struct netdev_xpliant *dev = netdev_xpliant_cast(netdev);
+    struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
     struct xpdev_queue *queue;
+    uint32_t wrap;
+    uint64_t count = UINT64_MAX;
+    XP_STATUS status = XP_NO_ERR;
 
     XP_TRACE_RL(poll_rl);
 
-    ovs_mutex_lock(&dev->mutex);
+    /* Any unsupported counts shall
+     * be returned with all one bits
+     * (UINT64_MAX) */
+    stats->tx_bytes   = UINT64_MAX;
+    stats->tx_packets = UINT64_MAX;
+    stats->tx_errors  = UINT64_MAX;
 
-    queue = xpdev_find_queue(dev, queue_id);
-
-    if (queue) {
-        stats->tx_bytes = UINT64_MAX;
-        stats->tx_packets = UINT64_MAX;
-        stats->tx_errors = UINT64_MAX;
-        stats->created = queue->created;
+    ovs_mutex_lock(&netdev->mutex);
+    /* Check for if netdev is enabled  */
+    if (netdev->pcfg.enable == false) {
+        /* Skip disabled netdev */
+        ovs_mutex_unlock(&netdev->mutex);
+        return EOPNOTSUPP;
     }
 
-    ovs_mutex_unlock(&dev->mutex);
+    queue = xpdev_find_queue(netdev, queue_id);
+
+    if (queue) {
+        stats->created = queue->created;
+    } else {
+        VLOG_DBG("Failed to Fetch queue details for q_id %d port: %s",
+                  queue_id, netdev_get_name(netdev_));
+    }
+
+    XP_LOCK();
+
+    status = xpsQosQcGetQueueFwdByteCountForPort(netdev->xpdev->id,
+                                                 netdev->port_num,
+                                                 queue_id, &count, &wrap);
+
+    if (XP_NO_ERR != status) {
+        /* No Error is returned, UINT64_MAX is assigned */
+        VLOG_DBG("unable to get queue %d Forward Byte Count for %s. RC = %u",
+                  queue_id, netdev_get_name(netdev_), status);
+    } else {
+        stats->tx_bytes = count;
+    }
+
+    status = xpsQosQcGetQueueFwdPacketCountForPort(netdev->xpdev->id,
+                                                   netdev->port_num,
+                                                   queue_id, &count, &wrap);
+
+    if (XP_NO_ERR != status) {
+        /* No Error is returned, UINT64_MAX is assigned */
+        VLOG_DBG("unable to get queue %d Forward Count for %s. RC = %u",
+                   queue_id, netdev_get_name(netdev_), status);
+    } else {
+        stats->tx_packets = count;
+    }
+
+    status = xpsQosQcGetQueueDropPacketCountForPort(netdev->xpdev->id,
+                                                    netdev->port_num,
+                                                    queue_id, &count, &wrap);
+
+    if (XP_NO_ERR != status) {
+        /* No Error is returned, UINT64_MAX is assigned */
+        VLOG_DBG("unable to get queue %d Drop Count for %s. RC = %u",
+                   queue_id, netdev_get_name(netdev_), status);
+    } else {
+        /* Considering tx_drops as tx_errors. As number of packets
+         * that were either unable to be queued (tail dropped),
+         * discarded, or were unsuccessfully transmitted  from the
+         * queue are considered as tx_errors */
+        stats->tx_errors = count;
+    }
+
+    XP_UNLOCK();
+
+    ovs_mutex_unlock(&netdev->mutex);
 
     return 0;
 }
@@ -1082,7 +1124,7 @@ netdev_xpliant_queue_dump_start(const struct netdev *netdev,
                                 void **statep)
 {
     struct netdev_xpliant *dev = netdev_xpliant_cast(netdev);
-    struct xpdev_queue_state *state = xmalloc(sizeof *state); 
+    struct xpdev_queue_state *state = xmalloc(sizeof *state);
     struct xpdev_queue *queue;
     size_t i = 0;
 
@@ -1147,13 +1189,30 @@ netdev_xpliant_queue_dump_done(const struct netdev *netdev OVS_UNUSED,
 }
 
 static int
-netdev_xpliant_dump_queue_stats(const struct netdev *netdev,
+netdev_xpliant_dump_queue_stats(const struct netdev *netdev_,
                                 void (*cb)(unsigned int queue_id,
                                            struct netdev_queue_stats *,
                                            void *aux),
                                 void *aux)
 {
+    struct netdev_queue_stats stats[OPS_QOS_MAX_QUEUE];
+    unsigned int queue_id;
+
     XP_TRACE();
+
+    /* For each queue, retrieve the statistics for
+     * Txpackets, TxBytes & TxDrops */
+    for (queue_id = 0; queue_id < OPS_QOS_MAX_QUEUE; queue_id++) {
+        netdev_xpliant_get_queue_stats(netdev_, queue_id, &stats[queue_id]);
+
+        if (cb) {
+            (*cb)(queue_id, &stats[queue_id], aux);
+        } else {
+            VLOG_DBG("NULL PI callback function for port: %s",
+                      netdev_get_name(netdev_));
+        }
+    }
+
     return 0;
 }
 
@@ -1230,52 +1289,6 @@ const struct netdev_class netdev_xpliant_class =
     NULL,                       /* rxq_drain */
 };
 
-
-/* For most types of netdevs we open the device for each call of
- * netdev_open().  However, this is not the case with tap devices,
- * since it is only possible to open the device once.  In this
- * situation we share a single file descriptor, and consequently
- * buffers, across all readers.  Therefore once data is read it will
- * be unavailable to other reads for tap devices. */
-static int
-netdev_xpliant_internal_construct(struct netdev *netdev_)
-{
-    struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
-    char *name = netdev_->name;
-    int err;
-
-    VLOG_INFO("%s: netdev %s", __FUNCTION__, netdev_get_name(netdev_));
-
-    ovs_mutex_init(&netdev->mutex);
-
-    netdev->tap_fd = ops_xp_tun_alloc(name, (IFF_TAP | IFF_NO_PI));
-    if (netdev->tap_fd <= 0) {
-        VLOG_ERR("Enable to create %s device.", name);
-        return EPERM;
-    }
-
-    err = set_nonblocking(netdev->tap_fd);
-    if (err) {
-        VLOG_ERR("Enable to set %s device into nonblocking mode.", name);
-        close(netdev->tap_fd);
-        return EPERM;
-    }
-
-    return 0;
-}
-
-static void
-netdev_xpliant_internal_destruct(struct netdev *netdev_)
-{
-    struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
-
-    if (netdev->tap_fd >= 0) {
-        close(netdev->tap_fd);
-    }
-
-    ovs_mutex_destroy(&netdev->mutex);
-}
-
 static int
 netdev_xpliant_internal_get_stats(const struct netdev *netdev_, struct netdev_stats *stats)
 {
@@ -1284,124 +1297,57 @@ netdev_xpliant_internal_get_stats(const struct netdev *netdev_, struct netdev_st
 }
 
 static int
-iff_to_nd_flags(int iff)
-{
-    enum netdev_flags nd = 0;
-    if (iff & IFF_UP) {
-        nd |= NETDEV_UP;
-    }
-    if (iff & IFF_PROMISC) {
-        nd |= NETDEV_PROMISC;
-    }
-    if (iff & IFF_LOOPBACK) {
-        nd |= NETDEV_LOOPBACK;
-    }
-    return nd;
-}
-
-static int
-nd_to_iff_flags(enum netdev_flags nd)
-{
-    int iff = 0;
-    if (nd & NETDEV_UP) {
-        iff |= IFF_UP;
-    }
-    if (nd & NETDEV_PROMISC) {
-        iff |= IFF_PROMISC;
-    }
-    if (nd & NETDEV_LOOPBACK) {
-        iff |= IFF_LOOPBACK;
-    }
-    return iff;
-}
-
-static int
-get_flags(const struct netdev *dev, unsigned int *flags)
-{
-    struct ifreq ifr;
-    int error;
-
-    *flags = 0;
-    error = af_inet_ifreq_ioctl(dev->name, &ifr, SIOCGIFFLAGS, "SIOCGIFFLAGS");
-    if (!error) {
-        *flags = ifr.ifr_flags;
-    }
-    return error;
-}
-
-static int
-set_flags(const char *name, unsigned int flags)
-{
-    struct ifreq ifr;
-
-    ifr.ifr_flags = flags;
-    return af_inet_ifreq_ioctl(name, &ifr, SIOCSIFFLAGS, "SIOCSIFFLAGS");
-}
-
-static int
-update_flags(struct netdev_xpliant *netdev, enum netdev_flags off,
-             enum netdev_flags on, enum netdev_flags *old_flagsp)
-    OVS_REQUIRES(netdev->mutex)
-{
-    int old_flags, new_flags;
-    int error = 0;
-
-    old_flags = netdev->ifi_flags;
-    *old_flagsp = iff_to_nd_flags(old_flags);
-    new_flags = (old_flags & ~nd_to_iff_flags(off)) | nd_to_iff_flags(on);
-    if (new_flags != old_flags) {
-        error = set_flags(netdev_get_name(&netdev->up), new_flags);
-        get_flags(&netdev->up, &netdev->ifi_flags);
-    }
-
-    return error;
-}
-
-static int
-netdev_xpliant_internal_update_flags(struct netdev *netdev_, enum netdev_flags off,
-                          enum netdev_flags on, enum netdev_flags *old_flagsp)
-{
-    struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
-    int error;
-
-    ovs_mutex_lock(&netdev->mutex);
-    error = update_flags(netdev, off, on, old_flagsp);
-    ovs_mutex_unlock(&netdev->mutex);
-
-    return error;
-}
-
-static int
 netdev_xpliant_internal_set_hw_intf_info(struct netdev *netdev_,
                                          const struct smap *args)
 {
     struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
     int rc = 0;
-    uint32_t dev_num;
-    struct ether_addr *ether_mac;
-
-    const char *hw_unit = smap_get(args, INTERFACE_HW_INTF_INFO_MAP_SWITCH_UNIT);
+    struct ether_addr *ether_mac = NULL;
     bool is_bridge_interface = smap_get_bool(args, INTERFACE_HW_INTF_INFO_MAP_BRIDGE, DFLT_INTERFACE_HW_INTF_INFO_MAP_BRIDGE);
 
-    VLOG_INFO("%s: netdev %s", __FUNCTION__, netdev_get_name(netdev_));
+    VLOG_INFO("%s: netdev %s, is_bridge_interface %u",
+              __FUNCTION__, netdev_get_name(netdev_), is_bridge_interface);
 
     ovs_mutex_lock(&netdev->mutex);
 
     if (netdev->intf_initialized == false) {
+        if(is_bridge_interface) {
+            ether_mac = (struct ether_addr *) netdev->hwaddr;
+            uint32_t dev_num = 0;
 
-        dev_num = 0;
+            netdev->xpdev = ops_xp_dev_by_id(dev_num);
+            if (netdev->xpdev == NULL) {
+                VLOG_ERR("Switch unit is not initialized");
+                goto error;
+            }
 
-        netdev->xpdev = ops_xp_dev_by_id(dev_num);
-        if (netdev->xpdev == NULL) {
-            VLOG_ERR("Switch unit is not initialized");
-            goto error;
+            netdev->port_num = CPU_PORT;
+			
+		    netdev->tap_fd = ops_xp_tun_alloc((char *)netdev_get_name(netdev_), (IFF_TAP | IFF_NO_PI));
+            if (netdev->tap_fd <= 0) {
+                VLOG_ERR("Unable to create %s device.", netdev_get_name(netdev_));
+                goto error;
+            }
+
+            rc = set_nonblocking(netdev->tap_fd);
+            if (rc) {
+                VLOG_ERR("Unable to set %s device into nonblocking mode.", netdev_get_name(netdev_));
+                close(netdev->tap_fd);
+                goto error;
+            }
+
+            if (0 != ops_xp_net_if_setup((char *)netdev_get_name(netdev_), ether_mac)) {
+                VLOG_ERR("Unable to setup %s interface.", netdev_get_name(netdev_));
+                close(netdev->tap_fd);
+                goto error;
+            }
         }
 
-        netdev->port_num = CPU_PORT;
         netdev->intf_initialized = true;
     }
 
     ovs_mutex_unlock(&netdev->mutex);
+
     return 0;
 
 error:
@@ -1416,19 +1362,49 @@ netdev_xpliant_internal_set_hw_intf_config(struct netdev *netdev_,
                                            const struct smap *args)
 {
     struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
+    const char *hw_enable = smap_get(args, INTERFACE_HW_INTF_CONFIG_MAP_ENABLE);
 
     VLOG_INFO("%s: netdev %s\n", __FUNCTION__, netdev_get_name(netdev_));
 
     if (netdev->intf_initialized == false) {
         VLOG_WARN("%s: netdev interface %s is not initialized.",
-                  __FUNCTION__, netdev->up.name);
+                  __FUNCTION__, netdev_get_name(&(netdev->up)));
         return EPERM;
     }
 
     ovs_mutex_lock(&netdev->mutex);
 
+    /* If interface is enabled */
+    if (STR_EQ(hw_enable, INTERFACE_HW_INTF_CONFIG_MAP_ENABLE_TRUE)) {
+        netdev->flags |= NETDEV_UP;
+        netdev->link_status = true;
+    } else {
+        netdev->flags &= ~NETDEV_UP;
+        netdev->link_status = false;
+    }
+
     netdev_change_seq_changed(netdev_);
 
+    ovs_mutex_unlock(&netdev->mutex);
+    return 0;
+}
+
+static int
+netdev_xpliant_internal_update_flags(struct netdev *netdev_,
+                                     enum netdev_flags off,
+                                     enum netdev_flags on,
+                                     enum netdev_flags *old_flagsp)
+{
+    /*  We ignore the incoming flags as the underlying hardware responsible to
+     *  change the status of the flags is absent. Thus, we set new flags to
+     *  preconfigured values. */
+    struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
+    if ((off | on) & ~NETDEV_UP) {
+        return EOPNOTSUPP;
+    }
+
+    ovs_mutex_lock(&netdev->mutex);
+    *old_flagsp = netdev->flags;
     ovs_mutex_unlock(&netdev->mutex);
 
     return 0;
@@ -1441,8 +1417,8 @@ static const struct netdev_class netdev_xpliant_internal_class = {
     NULL,                       /* wait */
 
     netdev_xpliant_alloc,
-    netdev_xpliant_internal_construct,
-    netdev_xpliant_internal_destruct,
+    netdev_xpliant_construct,
+    netdev_xpliant_destruct,
     netdev_xpliant_dealloc,
     NULL,                       /* get_config */
     NULL,                       /* set_config */
@@ -1514,7 +1490,7 @@ ops_xp_netdev_get_subintf_vlan(struct netdev *netdev_, xpsVlan_t *vlan)
 }
 
 static int
-netdev_xpliant_set_subif_config(struct netdev *netdev_, const struct smap *args)
+netdev_xpliant_subintf_set_config(struct netdev *netdev_, const struct smap *args)
 {
     struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
     struct netdev *parent = NULL;
@@ -1532,20 +1508,17 @@ netdev_xpliant_set_subif_config(struct netdev *netdev_, const struct smap *args)
         parent = netdev_from_name(parent_intf_name);
         if (parent != NULL) {
             parent_netdev = netdev_xpliant_cast(parent);
-            if (parent_netdev != NULL) {
-                netdev->port_num = parent_netdev->port_num;
-                netdev->ifId = parent_netdev->ifId;
-                memcpy(netdev->hwaddr, parent_netdev->hwaddr, ETH_ADDR_LEN);
-                netdev->subintf_vlan_id = (xpsVlan_t)vlan_id;
-                netdev->flags |= NETDEV_UP;
-                if (netdev->subintf_parent_name == NULL) {
-                    netdev->subintf_parent_name = xstrdup(parent_intf_name);
-                }
+            if (netdev->xpdev == NULL) {
+                netdev->xpdev = ops_xp_dev_ref(parent_netdev->xpdev);
+            }
+            netdev->ifId = parent_netdev->ifId;
+            memcpy(netdev->hwaddr, parent_netdev->hwaddr, ETH_ADDR_LEN);
+            netdev->subintf_vlan_id = (xpsVlan_t)vlan_id;
+            if (netdev->subintf_parent_name == NULL) {
+                netdev->subintf_parent_name = xstrdup(parent_intf_name);
             }
             netdev_close(parent);
         }
-    } else {
-        netdev->flags &= ~NETDEV_UP;
     }
 
     ovs_mutex_unlock(&netdev->mutex);
@@ -1621,9 +1594,9 @@ static const struct netdev_class netdev_xpliant_subintf_class = {
     netdev_xpliant_destruct,
     netdev_xpliant_dealloc,
     NULL,                       /* get_config */
-    netdev_xpliant_set_subif_config,
-    NULL,                       /* set_hw_intf_info */
-    NULL,                       /* set_hw_intf_config */
+    netdev_xpliant_subintf_set_config,
+    netdev_xpliant_internal_set_hw_intf_info,
+    netdev_xpliant_internal_set_hw_intf_config,
     NULL,                       /* get_tunnel_config */
     NULL,                       /* build header */
     NULL,                       /* push header */
@@ -1679,27 +1652,6 @@ static const struct netdev_class netdev_xpliant_subintf_class = {
     NULL,                       /* rxq_wait */
     NULL,                       /* rxq_drain */
 };
-
-static int
-netdev_xpliant_loopback_update_flags(struct netdev *netdev_,
-                                     enum netdev_flags off,
-                                     enum netdev_flags on,
-                                     enum netdev_flags *old_flagsp)
-{
-    /*  We ignore the incoming flags as the underlying hardware responsible to
-     *  change the status of the flags is absent. Thus, we set new flags to
-     *  preconfigured values. */
-    struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
-    if ((off | on) & ~NETDEV_UP) {
-        return EOPNOTSUPP;
-    }
-
-    ovs_mutex_lock(&netdev->mutex);
-    *old_flagsp = netdev->flags;
-    ovs_mutex_unlock(&netdev->mutex);
-
-    return 0;
-}
 
 static const struct netdev_class netdev_xpliant_l3_loopback_class = {
     "loopback",
@@ -1760,7 +1712,7 @@ static const struct netdev_class netdev_xpliant_l3_loopback_class = {
     NULL,                       /* get_status */
     NULL,                       /* arp_lookup */
 
-    netdev_xpliant_loopback_update_flags,
+    netdev_xpliant_internal_update_flags,
 
     NULL,                       /* rxq_alloc */
     NULL,                       /* rxq_construct */

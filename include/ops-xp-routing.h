@@ -88,12 +88,11 @@ typedef struct {
     bool nh_port;
 } xp_nh_entry_t;
 
-typedef struct xp_l3_intf{
+typedef struct xp_l3_intf {
     xpsInterfaceId_t l3_intf_id;    /* L3 interface ID */
-    xpsInterfaceId_t intf_id;       /* Valid if (!vlan_intf) */
+    xpsInterfaceId_t intf_id;       /* Port/LAG interface ID for non VLAN L3 */
     uint32_t l3_vrf;
     xpsVlan_t vlan_id;
-    bool vlan_intf;
 } xp_l3_intf_t;
 
 typedef struct net_address {
@@ -130,7 +129,7 @@ int ops_xp_routing_ecmp_hash_set(struct ofproto_xpliant *ofproto,
 xp_l3_intf_t *ops_xp_routing_enable_l3_interface(
                                     struct ofproto_xpliant *ofproto,
                                     xpsInterfaceId_t if_id, char *if_name,
-                                    xpsVlan_t vid, macAddr_t mac);
+                                    macAddr_t mac);
 
 xp_l3_intf_t *ops_xp_routing_enable_l3_subinterface(
                                     struct ofproto_xpliant *ofproto,
@@ -144,6 +143,9 @@ xp_l3_intf_t *ops_xp_routing_enable_l3_vlan_interface(
 
 void ops_xp_routing_disable_l3_interface(struct ofproto_xpliant *ofproto,
                                          xp_l3_intf_t *l3_intf);
+
+void ops_xp_routing_update_l3_interface(struct ofproto_xpliant *ofproto,
+                                        xp_l3_intf_t *l3_intf);
 
 void ops_xp_routing_unixctl_init(void);
 

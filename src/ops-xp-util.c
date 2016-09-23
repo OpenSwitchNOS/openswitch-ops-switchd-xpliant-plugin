@@ -30,14 +30,11 @@
 #include <netpacket/packet.h>
 #include <sys/select.h>
 
+#include "smap.h"
+#include "socket-util.h"
 #include "ops-xp-util.h"
 #include "openXpsPort.h"
 
-#undef closesocket
-
-#include <socket-util.h>
-
-#include "smap.h"
 
 VLOG_DEFINE_THIS_MODULE(xp_util);
 

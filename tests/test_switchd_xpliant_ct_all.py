@@ -84,8 +84,7 @@ class xpSimTest( OpsVsiTest ):
 
         info("Sleep 7\n")
         sleep(7)
-
-
+        
         out = h1.cmd("ping -c5 %s" % h2.IP())
 
         status = checkPing(out)

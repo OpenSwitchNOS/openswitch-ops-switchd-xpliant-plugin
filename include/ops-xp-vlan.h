@@ -54,7 +54,6 @@ struct xp_vlan_member_entry {
  * to configure VLAN in software as well as in the hardware. */
 struct xp_vlan {
     bool is_existing;           /* Flag signalizing VLAN is existing. */
-    bool user_created;          /* Flag showing if VLAN created by user */
     struct hmap members_table;  /* Table of members of this vlan. */
     struct hmap vxlan_vnis;     /* Table of VxLAN VNIs */
     struct hmap geneve_vnis;    /* Table of Geneve VNIs */
@@ -140,14 +139,6 @@ int ops_xp_vlan_member_get_encap_type(struct xp_vlan_mgr *mgr,
                                       xpsInterfaceId_t intfId,
                                       xpL2EncapType_e *encapType)
      OVS_REQ_RDLOCK(mgr->rwlock);
-
-int ops_xp_vlan_set_created_by_user(struct xp_vlan_mgr *mgr,
-                                    xpsVlan_t vlan_id, bool state)
-    OVS_REQ_WRLOCK(mgr->rwlock);
-
-bool ops_xp_vlan_is_created_by_user(struct xp_vlan_mgr *mgr,
-                                    xpsVlan_t vlan_id)
-    OVS_REQ_WRLOCK(mgr->rwlock);
 
 bool ops_xp_vlan_is_membership_empty(struct xp_vlan_mgr *mgr,
                                      xpsVlan_t vlan_id)

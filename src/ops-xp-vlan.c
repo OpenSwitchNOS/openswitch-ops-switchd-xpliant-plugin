@@ -54,7 +54,6 @@ ops_xp_vlan_mgr_create(struct xpliant_dev *xp_dev)
 
     for (i = XP_VLAN_MIN_ID; i <= XP_VLAN_MAX_ID; i++) {
         mgr->table[i].is_existing = false;
-        mgr->table[i].user_created = false;
         hmap_init(&mgr->table[i].members_table);
         hmap_init(&mgr->table[i].vxlan_vnis);
         hmap_init(&mgr->table[i].geneve_vnis);
@@ -615,23 +614,4 @@ ops_xp_vlan_is_membership_empty(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id)
     }
 
     return true;
-}
-
-int
-ops_xp_vlan_set_created_by_user(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id,
-                                bool state)
-{
-    if (!ops_xp_vlan_is_existing(mgr, vlan_id)) {
-        return ENOENT;
-    }
-
-    mgr->table[vlan_id].user_created = state;
-    return 0;
-}
-
-bool
-ops_xp_vlan_is_created_by_user(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id)
-{
-    return (ops_xp_vlan_is_existing(mgr, vlan_id) &&
-            mgr->table[vlan_id].user_created);
 }

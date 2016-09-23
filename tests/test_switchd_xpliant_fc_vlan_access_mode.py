@@ -44,6 +44,8 @@ intf2 = 2
 intf3 = 3
 intf4 = 4
 
+SLEEP_TIME = 5
+
 def sw_port_access(switch, port, vlan_id):
 
     switch.ConfigVtyShell(enter=True)
@@ -153,6 +155,7 @@ class Test_vlan_functionality:
         conf_ws_intf(wrkston02Obj, wrkston02Obj.linkPortMapping['lnk02'], "1.1.1.2", "24", "1.1.1.255")
         conf_ws_intf(wrkston03Obj, wrkston03Obj.linkPortMapping['lnk03'], "1.1.1.3", "24", "1.1.1.255")
         
+        sleep(SLEEP_TIME)
         ping("negative", wrkston01Obj, "1.1.1.2")
               
         ping("positive", wrkston01Obj, "1.1.1.3")
@@ -188,6 +191,7 @@ class Test_vlan_functionality:
 
         conf_ws_intf(wrkston02Obj, wrkston02Obj.linkPortMapping['lnk02'], "1.1.1.2", "24", "1.1.1.255")
 
+        sleep(SLEEP_TIME)
         ping("negative", wrkston01Obj, "1.1.1.2")
 
         set_ws_intf_down(wrkston01Obj, "eth0.125")
@@ -226,4 +230,5 @@ class Test_vlan_functionality:
 
         conf_ws_intf(wrkston02Obj, wrkston02Obj.linkPortMapping['lnk02'], "1.1.1.2", "24", "1.1.1.255")
 
+        sleep(SLEEP_TIME)
         ping("positive", wrkston01Obj, "1.1.1.2")

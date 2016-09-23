@@ -43,6 +43,7 @@
 #include <openswitch-idl.h>
 #include <ofproto/bond.h>
 #include "unixctl.h"
+#include "socket-util.h"
 
 #include "ops-xp-vlan-bitmap.h"
 #include "ops-xp-mac-learning.h"
@@ -60,11 +61,6 @@
 #include "openXpsMac.h"
 #include "openXpsReasonCodeTable.h"
 #include "openXpsInit.h"
-
-#ifdef closesocket
-#undef closesocket
-#endif
-#include "socket-util.h"
 
 
 VLOG_DEFINE_THIS_MODULE(xp_ofproto_provider);
@@ -456,8 +452,7 @@ ofproto_xpliant_port_construct(struct ofport *port_)
     VLOG_INFO("%s: up.name %s, netdev %s", __FUNCTION__,
               ofproto->up.name, netdev_get_name(netdev));
 
-    if (STR_EQ(netdev_get_type(netdev), OVSREC_INTERFACE_TYPE_VLANSUBINT) ||
-        STR_EQ(netdev_get_type(netdev), OVSREC_INTERFACE_TYPE_LOOPBACK)) {
+    if (!STR_EQ(netdev_get_type(netdev), OVSREC_INTERFACE_TYPE_SYSTEM)) {
         port->odp_port = ODPP_NONE;
         port->bundle = NULL;
         port->stp_port = NULL;
@@ -802,8 +797,7 @@ ofproto_xpliant_port_add(struct ofproto *ofproto_, struct netdev *netdev)
     VLOG_INFO("%s: up.name %s, devname %s", __FUNCTION__,
               ofproto->up.name, devname);
 
-    if (STR_EQ(netdev_get_type(netdev), OVSREC_INTERFACE_TYPE_VLANSUBINT) ||
-        STR_EQ(netdev_get_type(netdev), OVSREC_INTERFACE_TYPE_LOOPBACK)) {
+    if (!STR_EQ(netdev_get_type(netdev), OVSREC_INTERFACE_TYPE_SYSTEM)) {
         sset_add(&ofproto->ghost_ports, devname);
         return 0;
     }
@@ -858,8 +852,7 @@ ofproto_xpliant_port_del(struct ofproto *ofproto_, ofp_port_t ofp_port)
     sset_find_and_delete(&ofproto->ghost_ports,
                          netdev_get_name(ofport->up.netdev));
 
-    if (!STR_EQ(netdev_get_type(ofport->up.netdev), OVSREC_INTERFACE_TYPE_VLANSUBINT) &&
-        !STR_EQ(netdev_get_type(ofport->up.netdev), OVSREC_INTERFACE_TYPE_LOOPBACK)) {
+    if (STR_EQ(netdev_get_type(ofport->up.netdev), OVSREC_INTERFACE_TYPE_SYSTEM)) {
         ovs_rwlock_wrlock(&ofproto->dp_port_rwlock);
         error = do_del_port(ofproto, ofport->odp_port);
         ovs_rwlock_unlock(&ofproto->dp_port_rwlock);
@@ -1080,7 +1073,7 @@ bundle_del_port(struct ofport_xpliant *port)
     /* As the port is no longer member of any VLAN need to add it to the default
      * one. This will allow it to trap LACP frames in case it becomes member of
      * a dynamic LAG. */
-    if (is_xpliant_class(netdev_get_class(port->up.netdev))) {
+    if (STR_EQ(netdev_get_type(port->up.netdev), OVSREC_INTERFACE_TYPE_SYSTEM)) {
 
         struct netdev_xpliant *netdev = netdev_xpliant_cast(port->up.netdev);
 
@@ -1142,7 +1135,7 @@ bundle_add_port(struct bundle_xpliant *bundle, ofp_port_t ofp_port)
 
         /* As the port is going to be a part of the bundle need to remove it from
          * the default VLAN as membership will be applied based on bundle config */
-        if (is_xpliant_class(netdev_get_class(port->up.netdev))) {
+        if (STR_EQ(netdev_get_type(port->up.netdev), OVSREC_INTERFACE_TYPE_SYSTEM)) {
 
             struct netdev_xpliant *netdev = netdev_xpliant_cast(port->up.netdev);
 
@@ -1423,10 +1416,9 @@ bundle_update_hw_lag_config(struct ofproto_xpliant *ofproto,
 
         port = get_ofp_port(ofproto, s->slaves[i]);
         if (port) {
-
             /* Check if there are some slaves other than "xpliant" in the list
              * and return error if so. */
-            if (!is_xpliant_class(netdev_get_class(port->up.netdev))) {
+            if (!STR_EQ(netdev_get_type(port->up.netdev), OVSREC_INTERFACE_TYPE_SYSTEM)) {
                 VLOG_ERR("%s, Could not add port to bundle. Only \"xpliant\" "
                          "netdev\'s are acceptable as bundle slaves",
                          __FUNCTION__);
@@ -1456,21 +1448,21 @@ bundle_update_single_slave_config(struct ofproto_xpliant *ofproto,
                                   const struct ofproto_bundle_settings *s)
 {
     int ret_val = 0;
-    struct ofport_xpliant *xp_port = NULL;
+    struct ofport_xpliant *port = NULL;
 
     ovs_assert(ofproto);
     ovs_assert(bundle);
     ovs_assert(s);
-    xp_port = CONTAINER_OF(list_front(&bundle->ports),
-                           struct ofport_xpliant, bundle_node);
+    port = CONTAINER_OF(list_front(&bundle->ports),
+                        struct ofport_xpliant, bundle_node);
 
-    if (!STR_EQ(bundle->name, xp_port->up.netdev->name)) {
+    if (!STR_EQ(bundle->name, netdev_get_name(port->up.netdev))) {
         /* This is something different then a physical port or a tunnel.
          * Nothing to do more here. */
         return 0;
     }
 
-    if (!is_xpliant_class(netdev_get_class(xp_port->up.netdev))) {
+    if (!is_xpliant_class(netdev_get_class(port->up.netdev))) {
 
         VLOG_ERR("%s, Could not create bundle. Only \"xpliant\" and"
                  "\"xpliant_<tunnel-type>\" netdev\'s "
@@ -1479,106 +1471,12 @@ bundle_update_single_slave_config(struct ofproto_xpliant *ofproto,
         return EINVAL;
     }
 
-    bundle->intfId = ops_xp_get_ofport_intf_id(xp_port);
+    bundle->intfId = ops_xp_get_ofport_intf_id(port);
 
     VLOG_INFO("%s, bundle: %s, bundle->ifId: %d",
               __FUNCTION__, bundle->name, bundle->intfId);
 
     return 0;
-}
-
-/* Updates L3 configuration. */
-void
-bundle_update_l3_config(struct ofproto_xpliant *ofproto,
-                        struct bundle_xpliant *bundle,
-                        const struct ofproto_bundle_settings *s)
-{
-    struct ofport_xpliant *port;
-    xpsVlan_t vlan_id = 0;
-    const char *type = NULL;
-
-    ovs_assert(ofproto);
-    ovs_assert(bundle);
-    ovs_assert(s);
-
-    port = get_ofp_port(bundle->ofproto, s->slaves[0]);
-    if (!port) {
-        VLOG_ERR("slave is not in the ports");
-    }
-
-    type = netdev_get_type(port->up.netdev);
-
-    /* For internal vlan interfaces, we get vlanid from tag column
-     * For regular l3 interfaces we will get from internal vlan id from
-     * hw_config column
-     */
-    if (STR_EQ(type, OVSREC_INTERFACE_TYPE_INTERNAL)) {
-        vlan_id = s->vlan;
-    } else if (STR_EQ(type, OVSREC_INTERFACE_TYPE_VLANSUBINT)) {
-        ops_xp_netdev_get_subintf_vlan(port->up.netdev, &vlan_id);
-    } else {
-        vlan_id = smap_get_int(s->port_options[PORT_HW_CONFIG],
-                               "internal_vlan_id", 0);
-    }
-
-    if (bundle->l3_intf) {
-        /* if reserved vlan changed/removed or if port status is disabled */
-        if (bundle->l3_intf->vlan_id != vlan_id || !s->enable) {
-            ops_xp_routing_disable_l3_interface(ofproto, bundle->l3_intf);
-            bundle->l3_intf = NULL;
-
-        } else if (s->enable && bundle->is_lag && bundle->ports_updated) {
-            /* Ports were updated so need to update PVID. */
-            struct ofport_xpliant *lag_port;
-            LIST_FOR_EACH (lag_port, bundle_node, &bundle->ports) {
-                ops_xp_port_default_vlan_set(ofproto->xpdev->id,
-                                             ops_xp_get_ofport_number(lag_port),
-                                             vlan_id);
-            }
-        }
-    }
-
-    if (vlan_id && !bundle->l3_intf && s->enable) {
-        struct eth_addr mac;
-
-        netdev_get_etheraddr(port->up.netdev, &mac);
-
-        VLOG_INFO("%s: NETDEV %s, MAC "ETH_ADDR_FMT" VLAN %u",
-                  __FUNCTION__, netdev_get_name(port->up.netdev),
-                  ETH_ADDR_ARGS(mac), vlan_id);
-
-        if (STR_EQ(type, OVSREC_INTERFACE_TYPE_SYSTEM)) {
-            if (!bundle->is_lag) {
-                bundle->intfId = ops_xp_get_ofport_intf_id(port);
-            }
-            bundle->l3_intf = \
-                    ops_xp_routing_enable_l3_interface(ofproto,
-                                                       bundle->intfId,
-                                                       bundle->name,
-                                                       vlan_id, mac.ea);
-            /* Update PVID */
-            LIST_FOR_EACH (port, bundle_node, &bundle->ports) {
-                ops_xp_port_default_vlan_set(ofproto->xpdev->id,
-                                             ops_xp_get_ofport_number(port),
-                                             vlan_id);
-            }
-        } else if (STR_EQ(type, OVSREC_INTERFACE_TYPE_VLANSUBINT)) {
-            bundle->intfId = ops_xp_get_ofport_intf_id(port);
-            bundle->l3_intf = \
-                    ops_xp_routing_enable_l3_subinterface(ofproto,
-                                                          bundle->intfId,
-                                                          bundle->name,
-                                                          vlan_id, mac.ea);
-        } else if (STR_EQ(type, OVSREC_INTERFACE_TYPE_INTERNAL)) {
-            bundle->l3_intf = \
-                    ops_xp_routing_enable_l3_vlan_interface(ofproto,
-                                                            vlan_id,
-                                                            bundle->name,
-                                                            mac.ea);
-        } else {
-            VLOG_ERR("%s: unknown interface type: %s", __FUNCTION__, type);
-        }
-    }
 }
 
 /* Host Functions */
@@ -1878,6 +1776,99 @@ port_ip_reconfigure(struct ofproto_xpliant *ofproto,
     return 0;
 }
 
+/* Updates L3 configuration. */
+void
+bundle_update_l3_config(struct ofproto_xpliant *ofproto,
+                        struct bundle_xpliant *bundle,
+                        const struct ofproto_bundle_settings *s)
+{
+    struct ofport_xpliant *port;
+    xpsVlan_t vlan_id = 0;
+    const char *type = NULL;
+
+    ovs_assert(ofproto);
+    ovs_assert(bundle);
+    ovs_assert(s);
+
+    port = get_ofp_port(bundle->ofproto, s->slaves[0]);
+    if (!port) {
+        VLOG_ERR("slave is not in the ports");
+    }
+
+    type = netdev_get_type(port->up.netdev);
+
+    /* For internal vlan interfaces, we get vlanid from tag column
+     * For sub-interfaces, we get vlanid from netdev config
+     * For regular l3 interfaces we do not need vlanid
+     * For loopback interfaces we just configure IP addresses
+     */
+    if (STR_EQ(type, OVSREC_INTERFACE_TYPE_INTERNAL)) {
+        vlan_id = s->vlan;
+    } else if (STR_EQ(type, OVSREC_INTERFACE_TYPE_VLANSUBINT)) {
+        ops_xp_netdev_get_subintf_vlan(port->up.netdev, &vlan_id);
+    } else if (STR_EQ(type, OVSREC_INTERFACE_TYPE_LOOPBACK)) {
+        port_ip_reconfigure(ofproto, bundle, s);
+        return;
+    }
+
+    if (bundle->l3_intf) {
+        /* if reserved vlan changed/removed or if port status is disabled */
+        if (bundle->l3_intf->vlan_id != vlan_id || !s->enable) {
+            ops_xp_routing_disable_l3_interface(ofproto, bundle->l3_intf);
+            bundle->l3_intf = NULL;
+
+        } else if (s->enable && bundle->is_lag && bundle->ports_updated) {
+            /* Ports were updated so need to update L3 inteface config. */
+            ops_xp_routing_update_l3_interface(ofproto, bundle->l3_intf);
+        }
+    }
+
+    if (!bundle->l3_intf && s->enable) {
+        struct eth_addr mac;
+
+        netdev_get_etheraddr(port->up.netdev, &mac);
+
+        VLOG_INFO("%s: NETDEV %s, MAC "ETH_ADDR_FMT" VLAN %u",
+                  __FUNCTION__, netdev_get_name(port->up.netdev),
+                  ETH_ADDR_ARGS(mac), vlan_id);
+
+        if (STR_EQ(type, OVSREC_INTERFACE_TYPE_SYSTEM)) {
+            if (!bundle->is_lag) {
+                bundle->intfId = ops_xp_get_ofport_intf_id(port);
+            }
+            bundle->l3_intf = \
+                    ops_xp_routing_enable_l3_interface(ofproto,
+                                                       bundle->intfId,
+                                                       bundle->name,
+                                                       mac.ea);
+        } else if (STR_EQ(type, OVSREC_INTERFACE_TYPE_VLANSUBINT)) {
+            if (vlan_id) {
+                bundle->intfId = ops_xp_get_ofport_intf_id(port);
+                bundle->l3_intf = \
+                        ops_xp_routing_enable_l3_subinterface(ofproto,
+                                                              bundle->intfId,
+                                                              bundle->name,
+                                                              vlan_id, mac.ea);
+            }
+        } else if (STR_EQ(type, OVSREC_INTERFACE_TYPE_INTERNAL)) {
+            if (vlan_id) {
+                bundle->l3_intf = \
+                        ops_xp_routing_enable_l3_vlan_interface(ofproto,
+                                                                vlan_id,
+                                                                bundle->name,
+                                                                mac.ea);
+            }
+        } else {
+            VLOG_ERR("%s: unknown interface type: %s", __FUNCTION__, type);
+        }
+    }
+
+    /* Check for ip changes */
+    if (bundle->l3_intf) {
+        port_ip_reconfigure(ofproto, bundle, s);
+    }
+}
+
 static void
 bundle_destroy(struct bundle_xpliant *bundle)
 {
@@ -2019,14 +2010,13 @@ ofproto_xpliant_bundle_set(struct ofproto *ofproto_, void *aux,
 
     VLOG_DBG("%s, ###### Bundle name: %s", __FUNCTION__, bundle->name);
 
-    /* Handle L3 configuration. */
-    if (ofproto->vrf && (s->n_slaves > 0)) {
-        bundle_update_l3_config(ofproto, bundle, s);
+    /* Handle LAG configuration in HW */
+    if (bundle->is_lag) {
+        ret_val = bundle_update_hw_lag_config(ofproto, bundle, s);
+        if (ret_val) {
+            return ret_val;
+        }
     }
-
-    /* Check for ip changes */
-    /* if ( (bundle->l3_intf) ) */
-    port_ip_reconfigure(ofproto, bundle, s);
 
     /* Look for port configuration options
      * FIXME: - fill up stubs with actual actions */
@@ -2040,28 +2030,10 @@ ofproto_xpliant_bundle_set(struct ofproto *ofproto_, void *aux,
        VLOG_DBG("BOND config options option_arg= %s", opt_arg);
     }
 
-    if (STR_EQ(ofproto->up.name, bundle->name)) {
-        struct netdev* sys_dev = netdev_from_name(ofproto->up.name);
-
-        if (sys_dev != NULL) {
-            /* The system MAC is the same as internal port's MAC. */
-            netdev_get_etheraddr(sys_dev, &ofproto->sys_mac);
-            netdev_close(sys_dev);
-        }
-
-        /* Nothing to do for internal port. */
-        return 0;
-    }
-
-    /* Handle LAG configuration in HW */
-    if (bundle->is_lag) {
-        ret_val = bundle_update_hw_lag_config(ofproto, bundle, s);
-        if (ret_val) {
-            return ret_val;
-        }
-    }
-
-    if (!ofproto->vrf) {
+    /* Handle L3 configuration. */
+    if (ofproto->vrf && (s->n_slaves > 0)) {
+        bundle_update_l3_config(ofproto, bundle, s);
+    } else if (!ofproto->vrf) {
         /* Update L2 port configuration */
         if (!bundle->is_lag && (s->n_slaves == 1)) {
             ret_val = bundle_update_single_slave_config(ofproto, bundle, s);
@@ -2132,7 +2104,6 @@ ofproto_xpliant_set_vlan(struct ofproto *ofproto_, int vid, bool add)
             if (error) {
                 return error;
             }
-            ops_xp_vlan_set_created_by_user(ofproto->vlan_mgr, (xpsVlan_t)vid, true);
         }
 
         /* Add this VLAN to any port specified by 'trunks' map */
@@ -2164,7 +2135,6 @@ ofproto_xpliant_set_vlan(struct ofproto *ofproto_, int vid, bool add)
         }
         /* Do not remove default VLAN */
         if (vid != XP_DEFAULT_VLAN_ID) {
-            ops_xp_vlan_set_created_by_user(ofproto->vlan_mgr,(xpsVlan_t)vid, false);
             /* Remove VLAN only if no l3 interfaces are still using it */
             if (ops_xp_vlan_is_membership_empty(ofproto->vlan_mgr,
                                                 (xpsVlan_t)vid)) {

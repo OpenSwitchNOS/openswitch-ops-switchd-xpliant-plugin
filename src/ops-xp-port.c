@@ -43,7 +43,7 @@
 
 VLOG_DEFINE_THIS_MODULE(xp_port);
 
-#define XP_PORT_LINK_POLL_INTERVAL  (2000u)
+#define XP_PORT_LINK_POLL_INTERVAL  (1000u)
 
 
 int
@@ -128,15 +128,16 @@ ops_xp_port_mac_mode_set(struct xp_port_info *p_info, xpMacConfigMode mac_mode)
         /* Disable ports on split/no-split */
         port_info = ops_xp_dev_get_port_info(p_info->id, p_info->port_num + i);
         if (port_info) {
+            port_info->hw_enable = false;
             XP_LOCK();
-            status = xpsMacPortEnable(port_info->id, port_info->port_num, false);
+            status = xpsMacPortEnable(port_info->id, port_info->port_num,
+                                      port_info->hw_enable);
             if (status != XP_NO_ERR) {
                 VLOG_ERR("%s: unable to set port enable. Err=%d",
                          __FUNCTION__, status);
                 return EFAULT;
             }
             XP_UNLOCK();
-            port_info->hw_enable = false;
         }
     }
 

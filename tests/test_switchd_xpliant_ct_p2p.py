@@ -344,6 +344,8 @@ class xpSimTest( OpsVsiTest ):
             s.cmdCLI("exit")
             i += 1
 
+        time.sleep(1)
+
         s1 = self.net.switches[ 0 ]
         s2 = self.net.switches[ 1 ]
 

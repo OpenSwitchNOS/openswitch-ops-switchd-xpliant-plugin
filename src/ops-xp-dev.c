@@ -50,7 +50,7 @@
 
 VLOG_DEFINE_THIS_MODULE(xp_dev);
 
-#define XP_CPU_PORT_NUM         135
+#define XP_CPU_PORT_NUM                 135
 
 struct xp_if_id_to_name_entry {
     struct hmap_node hmap_node;       /* Node in if_id_to_name_map hmap. */
@@ -198,12 +198,15 @@ ops_xp_dev_system_defaults_set(const struct xpliant_dev *dev)
     int i;
     XP_STATUS status;
 
-    /* Turn all the ports off by default. */
+    /* Set default port state. */
     for (i = 0; i < XP_MAX_TOTAL_PORTS; i++) {
-        status = xpsMacPortEnable(dev->id, i, false);
-        if (status != XP_NO_ERR) {
-            VLOG_ERR("%s: Error while disabling port: %d. "
-                     "Error code: %d\n", __FUNCTION__, i, status);
+        const struct xp_port_info *port_info = &dev->port_info[i];
+        if (port_info->initialized) {
+            status = xpsMacPortEnable(dev->id, i, port_info->hw_enable);
+            if (status != XP_NO_ERR) {
+                VLOG_ERR("%s: Error while disabling port: %d. "
+                         "Error code: %d\n", __FUNCTION__, i, status);
+            }
         }
     }
 
@@ -211,8 +214,6 @@ ops_xp_dev_system_defaults_set(const struct xpliant_dev *dev)
     if (error) {
         VLOG_ERR("Unable to create default VLAN");
     }
-
-    ops_xp_vlan_set_created_by_user(dev->vlan_mgr, XP_DEFAULT_VLAN_ID, true);
 
     status = xpsVlanSetDefault(dev->id, XP_DEFAULT_VLAN_ID);
     if (status != XP_NO_ERR) {
@@ -342,6 +343,17 @@ ops_xp_dev_init(struct xpliant_dev *dev)
     dev->rxq_thread = ovs_thread_create("ops-xp-dev-recv", xp_dev_recv_handler,
                                         (void *)dev);
     VLOG_INFO("XPliant device's RXQ processing thread started");
+
+    for (i = 0; i < XP_MAX_TOTAL_PORTS; i++) {
+        struct xp_port_info *port_info = &dev->port_info[i];
+        port_info->id = dev->id;
+        port_info->port_num = i;
+        port_info->hw_enable = false;
+        port_info->port_mac_mode = MAC_MODE_4X10GB;
+        port_info->serdes_tuned = false;
+        port_info->initialized = \
+                (xpsIsPortInited(dev->id, i) == XP_PORT_NOT_INITED) ? false : true;
+    }
 
     /* Create event processing thread */
     dev->event_thread = xp_dev_event_handler_create(dev);

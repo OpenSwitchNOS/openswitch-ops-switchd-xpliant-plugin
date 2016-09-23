@@ -32,6 +32,8 @@ intf2 = 2
 intf3 = 3
 intf4 = 4
 
+SLEEP_TIME = 5
+
 def sw_ports_trunk_20_30_40(switch):
     
     switch.ConfigVtyShell(enter=True)
@@ -153,6 +155,7 @@ class Test_vlan_functionality:
         conf_link_intf(wrkston02Obj, "eth0.20", "1.1.1.2", "24", "1.1.1.255")      
         set_ws_intf_up(wrkston02Obj, "eth0.20")
 
+        sleep(SLEEP_TIME)
         ping("positive", wrkston01Obj, "1.1.1.2")
 
         print "\nApplying configurations...\n"
@@ -221,6 +224,7 @@ class Test_vlan_functionality:
         conf_link_intf(wrkston02Obj, "eth0.21", "1.1.1.2", "24", "1.1.1.255")      
         set_ws_intf_up(wrkston02Obj, "eth0.21")
 
+        sleep(SLEEP_TIME)
         ping("negative", wrkston01Obj, "1.1.1.2")
 
         print "\nApplying configurations...\n"

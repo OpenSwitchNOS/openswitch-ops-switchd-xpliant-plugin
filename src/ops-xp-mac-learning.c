@@ -58,7 +58,9 @@ VLOG_DEFINE_THIS_MODULE(xp_mac_learning);
 /*struct xp_mac_learning* g_xp_ml = NULL;*/
 static struct vlog_rate_limit ml_rl = VLOG_RATE_LIMIT_INIT(5, 20);
 
+#ifdef OPS_XP_ML_EVENT_PROCESSING
 static void *mac_learning_events_handler(void *arg);
+#endif /* OPS_XP_ML_EVENT_PROCESSING */
 static void ops_xp_mac_learning_mlearn_action_add(struct xp_mac_learning *ml,
                                                   xpsFdbEntry_t *xps_fdb_entry,
                                                   uint32_t index,
@@ -926,12 +928,15 @@ ops_xp_mac_learning_on_aging(xpsDevice_t devId, uint32_t *index, void *userData)
     event.data.index = *index;
 
     /* send event to FDB task */
-    retval = write(ml->event_latch.fds[1], &event, sizeof(event));
+    do {
+        retval = write(ml->event_latch.fds[1], &event, sizeof(event));
+        pthread_yield();
+    } while (((retval < 0) && (errno == EAGAIN)) || ((retval != sizeof(event))));
 
-    if ((retval < 0) || (retval != sizeof(event))) {
-        VLOG_WARN_RL(&ml_rl, "failed to send event (%s)", 
-                     (retval < 0) ? ovs_strerror(errno) :
-                     "incomplete data sent");
+    if (retval < 0) {
+        VLOG_WARN("failed to send event (%s)",
+                  ovs_strerror(errno));
+        return retval;
     }
 #else
     ovs_rwlock_wrlock(&ml->rwlock);

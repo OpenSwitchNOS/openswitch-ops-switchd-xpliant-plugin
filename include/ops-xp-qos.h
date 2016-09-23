@@ -28,6 +28,9 @@
 #include "ofproto/ofproto-provider.h"
 #include "qos-asic-provider.h"
 
+#define OPS_QOS_NUM_DEI_VALUES     2
+#define OPS_QOS_MAX_QUEUE          8
+
 int ops_xp_qos_set_port_qos_cfg(struct ofproto *ofproto_, void *aux,
                                 const struct qos_port_settings *settings);
 

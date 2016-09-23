@@ -33,6 +33,7 @@
 #include "ops-xp-netdev.h"
 #include "openXpsLag.h"
 #include "openXpsInterface.h"
+#include "openXpsL3.h"
 
 VLOG_DEFINE_THIS_MODULE(xp_lag);
 
@@ -282,6 +283,14 @@ lag_detach_port_on_hw(xpsDevice_t dev_id, xpsInterfaceId_t lag_id,
     if (status != XP_NO_ERR) {
         VLOG_ERR("%s: Could not deploy LAG %u changes to hardware. "
                  "Error code: %d\n", __FUNCTION__, lag_id, status);
+        return EFAULT;
+    }
+
+    /* Unbind port from L3 config. Just in case L3 was configured on a LAG */
+    status = xpsL3UnBindPortIntf(if_id);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("%s: Could not unbind port: %u from L3 config."
+                 "Error code: %d", __FUNCTION__, if_id, status);
         return EFAULT;
     }
 

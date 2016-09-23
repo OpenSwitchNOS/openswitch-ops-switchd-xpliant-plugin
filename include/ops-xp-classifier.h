@@ -36,6 +36,8 @@
 struct xp_acl_rule {
     struct ovs_list list_node;
     uint32_t        rule_id;
+    uint8_t         counter_en;
+    uint64_t        count;
 };
 
 struct xp_acl_interface {

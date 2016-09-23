@@ -26,6 +26,7 @@
 #include "openvswitch/vlog.h"
 #include "ofproto/ofproto-provider.h"
 #include "openXpsAclIdMgr.h"
+#include "openXpsAcm.h"
 #include "openXpsIacl.h"
 #include "openXpsL3.h"
 #include "openXpsPort.h"
@@ -259,7 +260,7 @@ ops_xp_cls_init(xpsDevice_t dev)
     status = XP_NO_ERR;
 
     /* Port IACL */
-    status = xpsTcamMgrAddTable(devId, XP_ACL_IACL0, XPS_TCAM_ACL_ALGORITHM);
+    status = xpsTcamMgrAddTable(devId, XP_ACL_IACL0, XPS_TCAM_LIST_ALGORITHM);
     if (status != XP_NO_ERR) {
         VLOG_INFO("xpsTcamMgrAddTable failed with error code %d, "
                   "for table type  %s", status, XP_ACL_IACL0);
@@ -272,7 +273,7 @@ ops_xp_cls_init(xpsDevice_t dev)
     }
 
     /* Bridge IACL */
-    status = xpsTcamMgrAddTable(devId, XP_ACL_IACL1, XPS_TCAM_ACL_ALGORITHM);
+    status = xpsTcamMgrAddTable(devId, XP_ACL_IACL1, XPS_TCAM_LIST_ALGORITHM);
     if (status != XP_NO_ERR) {
         VLOG_INFO("xpsTcamMgrAddTable failed with error code %d, "
                   "for table type  %s", status, XP_ACL_IACL1);
@@ -285,7 +286,7 @@ ops_xp_cls_init(xpsDevice_t dev)
     }
 
     /* Router IACL */
-    status = xpsTcamMgrAddTable(devId, XP_ACL_IACL2, XPS_TCAM_ACL_ALGORITHM);
+    status = xpsTcamMgrAddTable(devId, XP_ACL_IACL2, XPS_TCAM_LIST_ALGORITHM);
     if (status != XP_NO_ERR) {
         VLOG_INFO("xpsTcamMgrAddTable failed with error code %d, "
                   "for table type  %s", status, XP_ACL_IACL2);
@@ -298,7 +299,7 @@ ops_xp_cls_init(xpsDevice_t dev)
     }
 
     /* EACL */
-    status = xpsTcamMgrAddTable(devId, XP_ACL_EACL,  XPS_TCAM_ACL_ALGORITHM);
+    status = xpsTcamMgrAddTable(devId, XP_ACL_EACL,  XPS_TCAM_LIST_ALGORITHM);
     if (status != XP_NO_ERR) {
         VLOG_INFO("xpsTcamMgrAddTable failed with error code %d, "
                   "for table type  %s", status, XP_ACL_EACL);
@@ -687,6 +688,14 @@ ops_xp_cls_create_rule_entry_list(struct xp_acl_entry *classifier,
         status = xpsTcamMgrAllocEntry(devId, tableId, priority, &rule_index);
 
         entry->rule_id = rule_index;
+        entry->counter_en = 0;
+        
+        /* Update count enable filed */
+        if (cls_list->entries[i].entry_actions.action_flags & OPS_CLS_ACTION_COUNT) {
+            entry->counter_en = 1;
+            entry->count = 0;
+        }
+
         list_push_back(list, &entry->list_node);
 
         /* Get hw tcamId from rule entry index */
@@ -1425,6 +1434,12 @@ ops_xp_cls_list_update(struct ops_cls_list *list,
             ops_xp_cls_destroy_rule_entry_list(acl_entry_pacl);
 
             acl_entry_pacl->rule_list = pacl_new_list;
+            
+            /* updating new lists first node and last node propely with base
+             * list pointer, so that circular linked list is updated properly
+             */
+            pacl_new_list.next->prev = &acl_entry_pacl->rule_list;
+            pacl_new_list.prev->next = &acl_entry_pacl->rule_list;
         }
 
         if (updated_racl) {
@@ -1436,6 +1451,12 @@ ops_xp_cls_list_update(struct ops_cls_list *list,
             ops_xp_cls_destroy_rule_entry_list(acl_entry_racl);
 
             acl_entry_racl->rule_list = racl_new_list;
+
+            /* updating new lists first node and last node propely with base
+             * list pointer, so that circular linked list is updated properly
+             */
+            racl_new_list.next->prev = &acl_entry_racl->rule_list;
+            racl_new_list.prev->next = &acl_entry_racl->rule_list;
         }
     }
     return 0;
@@ -1449,7 +1470,97 @@ ops_xp_cls_stats_get(const struct uuid *list_id, const char *list_name,
                      struct ops_cls_statistics *statistics,
                      int num_entries, struct ops_cls_pd_list_status *status)
 {
+    
+    xpAclType_e         acl_type;
+    xpAcmClient_e       client;
+    xpsDevice_t         devId;
+    struct hmap         *classifier_hmap;
+    uint8_t             invalid_iacl_type;
+    struct xp_acl_entry *acl_entry;
+    struct ovs_list     *ovslist;
+    struct xp_acl_rule  *entry, *next_entry;
+    uint32_t            tcamId;
+    uint64_t            count_pkts, count_bytes;
+
     VLOG_DBG("%s", __FUNCTION__);
+    
+    /* currently we support statistics based on the ACL type only
+     * i.e per ACE statistics available for L2 port, L3 port and Vlan
+     * interface. we can not support per port per ACE basis as per HW
+     * limitation
+     */
+
+    devId = 0;
+    invalid_iacl_type = 0;
+
+    acl_type = ops_xp_cls_get_type(interface_info, direction);
+
+    switch(acl_type) {
+    case XP_ACL_IACL0:
+        classifier_hmap = &classifier_hmap_pacl;
+        client = XP_ACM_IPACL_COUNTER;
+        break;
+
+    case XP_ACL_IACL1:
+        classifier_hmap = &classifier_hmap_bacl;
+        client = XP_ACM_IBACL_COUNTER;
+        break;
+
+    case XP_ACL_IACL2:
+        classifier_hmap = &classifier_hmap_racl;
+        client = XP_ACM_IRACL_COUNTER;
+        break;
+
+    default:
+        invalid_iacl_type = 1;
+        break;
+
+    }
+    
+    if (invalid_iacl_type) {
+        /* update status and return */
+        return 0;
+    }
+
+    acl_entry = ops_xp_cls_lookup_from_hmap_type(list_id,
+                                                 classifier_hmap);
+    
+    if (acl_entry) {
+        
+        int i = 0;
+        ovslist = &acl_entry->rule_list;
+        
+        if (num_entries+1 != acl_entry->num_rules) {
+            /* update status and return */
+            return 0;
+        }
+
+        VLOG_DBG("acl_id %d exists in HMAP for this UUID %d",
+                 acl_entry->acl_id, *list_id);
+
+        /* Print TCAM manager rule ids for debugging purpose */
+        LIST_FOR_EACH_SAFE (entry, next_entry, list_node, ovslist) {
+            
+            xpsTcamMgrTcamIdFromEntryGet(0, 0, entry->rule_id, &tcamId);
+            count_pkts = 0;
+            count_bytes = 0;
+            
+            if ((i != num_entries) && entry->counter_en) {
+
+                xpsAcmGetCounterValue(devId, client, tcamId, &count_pkts, &count_bytes);
+                entry->count += count_pkts;
+                statistics[i].stats_enabled = 1;
+                statistics[i].hitcounts = entry->count;
+
+                VLOG_DBG("count for rule entry %d, tcam manger rule id :%d, HWTCAM id :%d is %d",
+                         i, entry->rule_id, tcamId, entry->count);
+
+            }
+
+            i++;
+        }
+
+    }
 
     return 0;
 }
@@ -1461,7 +1572,89 @@ ops_xp_cls_stats_clear(const struct uuid *list_id, const char *list_name,
                        enum ops_cls_direction direction,
                        struct ops_cls_pd_list_status *status)
 {
+    xpAclType_e         acl_type;
+    xpAcmClient_e       client;
+    xpsDevice_t         devId;
+    struct hmap         *classifier_hmap;
+    uint8_t             invalid_iacl_type;
+    struct xp_acl_entry *acl_entry;
+    struct ovs_list     *ovslist;
+    struct xp_acl_rule  *entry, *next_entry;
+    uint32_t            tcamId;
+    uint64_t            count_pkts, count_bytes;
+
     VLOG_DBG("%s", __FUNCTION__);
+
+    /* currently we support statistics based on the ACL type only
+     * i.e per ACE statistics available for L2 port, L3 port and Vlan
+     * interface. we can not support per port per ACE basis as per HW
+     * limitation
+     */
+
+    devId = 0;
+    invalid_iacl_type = 0;
+
+    acl_type = ops_xp_cls_get_type(interface_info, direction);
+
+    switch(acl_type) {
+    case XP_ACL_IACL0:
+        classifier_hmap = &classifier_hmap_pacl;
+        client = XP_ACM_IPACL_COUNTER;
+        break;
+
+    case XP_ACL_IACL1:
+        classifier_hmap = &classifier_hmap_bacl;
+        client = XP_ACM_IBACL_COUNTER;
+        break;
+
+    case XP_ACL_IACL2:
+        classifier_hmap = &classifier_hmap_racl;
+        client = XP_ACM_IRACL_COUNTER;
+        break;
+
+    default:
+        invalid_iacl_type = 1;
+        break;
+
+    }
+
+    if (invalid_iacl_type) {
+        /* update status and return */
+        return 0;
+    }
+
+    acl_entry = ops_xp_cls_lookup_from_hmap_type(list_id,
+                                                 classifier_hmap);
+
+    if (acl_entry) {
+
+        int i = 0;
+        ovslist = &acl_entry->rule_list;
+
+        VLOG_DBG("acl_id %d exists in HMAP for this UUID %d",
+                 acl_entry->acl_id, *list_id);
+
+        /* Print TCAM manager rule ids for debugging purpose */
+        LIST_FOR_EACH_SAFE (entry, next_entry, list_node, ovslist) {
+
+            xpsTcamMgrTcamIdFromEntryGet(0, 0, entry->rule_id, &tcamId);
+            count_pkts = 0;
+            count_bytes = 0;
+
+            if (entry->counter_en) {
+
+                /* HW counters work on clear on read basis and hence the below call clears the counter value */
+                xpsAcmGetCounterValue(devId, client, tcamId, &count_pkts, &count_bytes);
+                entry->count = 0;
+
+                VLOG_DBG("count for rule entry %d, tcam manger rule id :%d, HWTCAM id :%d is %d",
+                         i, entry->rule_id, tcamId, entry->count);
+            }
+
+            i++;
+        }
+
+    }
 
     return 0;
 }

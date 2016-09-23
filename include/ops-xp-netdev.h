@@ -112,7 +112,6 @@ struct netdev_xpliant {
     xpsVlan_t subintf_vlan_id;
 
     /* For devices of class netdev_xpliant_internal_class only. */
-    unsigned int ifi_flags;
     int tap_fd;
 };
 

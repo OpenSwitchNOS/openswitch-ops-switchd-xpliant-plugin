@@ -39,7 +39,6 @@
 
 VLOG_DEFINE_THIS_MODULE(xp_routing);
 
-
 typedef struct {
     struct ofproto_xpliant *ofproto;
     char *prefix;
@@ -267,7 +266,7 @@ ops_xp_routing_add_host_entry(struct ofproto_xpliant *ofproto,
             memcpy(e->mac_addr, &ether_mac, ETH_ADDR_LEN);
         }
     }
-    e->xp_host.nhEntry.propTTL = IPDEFTTL;
+    e->xp_host.nhEntry.propTTL = false;
     e->xp_host.vrfId = ofproto->vrf_id;
 
     if (is_ipv6_addr) {
@@ -585,7 +584,7 @@ nh_update(xp_l3_mgr_t *mgr, xp_nh_entry_t *xp_nh,
         xp_nh->xp_nh.pktCmd = XP_PKTCMD_TRAP;
     }
 
-    xp_nh->xp_nh.propTTL = IPDEFTTL;
+    xp_nh->xp_nh.propTTL = false;
 
     return 0;
 }
@@ -1323,8 +1322,8 @@ ops_xp_routing_ecmp_hash_set(struct ofproto_xpliant *ofproto,
 } /* xp_routing_ecmp_hash_set */
 
 static int
-l3_iface_mac_set(struct ofproto_xpliant *ofproto,
-                 xpsInterfaceId_t l3_intf_id, macAddr_t mac)
+l3_iface_mac_set(struct ofproto_xpliant *ofproto, xpsInterfaceId_t l3_intf_id,
+                 macAddr_t mac, xpsVlan_t vid)
 {
     XP_STATUS status = XP_NO_ERR;
     static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
@@ -1354,11 +1353,19 @@ l3_iface_mac_set(struct ofproto_xpliant *ofproto,
         return EFAULT;
     }
 
-    status = xpsL3AddIntfIngressRouterMac(ofproto->xpdev->id, l3_intf_id, xp_mac);
-    if (status != XP_NO_ERR) {
-        VLOG_ERR("Failed to set ingress MAC for L3 VLAN interface %u. "
-                 "Error: %d", l3_intf_id, status);
-        return EFAULT;
+    if (vid) {
+        status = xpsL3AddIngressRouterVlanMac(ofproto->xpdev->id, vid, xp_mac);
+        if (status != XP_NO_ERR) {
+            VLOG_ERR("Failed to set ingress router MAC for VLAN %u. "
+                     "Error: %d", vid, status);
+            return EFAULT;
+        }
+    } else {
+        status = xpsL3AddIngressRouterMac(ofproto->xpdev->id, xp_mac);
+        if (status != XP_NO_ERR) {
+            VLOG_ERR("Failed to set ingress router MAC. Error: %d", status);
+            return EFAULT;
+        }
     }
 
     return 0;
@@ -1369,6 +1376,7 @@ ops_xp_routing_disable_l3_interface(struct ofproto_xpliant *ofproto,
                                     xp_l3_intf_t *l3_intf)
 {
     XP_STATUS status;
+    xpsInterfaceType_e l3_intf_type = XPS_PORT;
     int rc;
 
     ovs_assert(ofproto);
@@ -1378,35 +1386,120 @@ ops_xp_routing_disable_l3_interface(struct ofproto_xpliant *ofproto,
     VLOG_INFO("%s: L3 interface ID 0x%08X, VLAN %u",
               __FUNCTION__, l3_intf->l3_intf_id, l3_intf->vlan_id);
 
+    status = xpsInterfaceGetType(l3_intf->intf_id, &l3_intf_type);
+    if (status != XP_NO_ERR) {
+        VLOG_WARN("Failed to get interface type for interface %u",
+                  l3_intf->intf_id);
+    }
+
     /* Remove interface ID to name mapping in xpdev. */
     ops_xp_dev_remove_intf_entry(ofproto->xpdev,
                                  l3_intf->l3_intf_id, 0);
 
-    if (!l3_intf->vlan_intf) {
-        rc = ops_xp_vlan_member_remove(ofproto->vlan_mgr, l3_intf->vlan_id,
-                                       l3_intf->intf_id);
-        if (rc) {
-            VLOG_WARN("Failed to remove Port %u from VLAN %u",
-                      l3_intf->intf_id, l3_intf->vlan_id);
+    switch (l3_intf_type) {
+    case XPS_PORT_ROUTER:
+        status = xpsL3UnBindPortIntf(l3_intf->intf_id);
+        if (status != XP_NO_ERR) {
+            VLOG_ERR("Failed to unbind port for L3 port interface. Error: %d",
+                     status);
         }
 
-        if (ops_xp_vlan_is_membership_empty(ofproto->vlan_mgr,
-                                            l3_intf->vlan_id) &&
-            !ops_xp_vlan_is_created_by_user(ofproto->vlan_mgr,
-                                            l3_intf->vlan_id)) {
-            rc = ops_xp_vlan_remove(ofproto->vlan_mgr, l3_intf->vlan_id);
-            if (rc) {
-                VLOG_WARN("Failed to remove VLAN %u", l3_intf->vlan_id);
-            }
+        status = xpsL3DeInitPortIntf(ofproto->xpdev->id, l3_intf->l3_intf_id);
+        if (status != XP_NO_ERR) {
+            VLOG_ERR("Failed to de-initialize L3 port interface. Error: %d",
+                     status);
         }
-    }
 
-    status = xpsL3DestroyVlanIntf(l3_intf->vlan_id, l3_intf->l3_intf_id);
-    if (status != XP_NO_ERR) {
-        VLOG_ERR("Could not remove L3 interface. Error: %d", status);
+        status = xpsL3DestroyPortIntf(l3_intf->l3_intf_id);
+        if (status != XP_NO_ERR) {
+            VLOG_ERR("Failed to destroy L3 port interface. Error: %d",
+                     status);
+        }
+        break;
+    case XPS_SUBINTERFACE_ROUTER:
+        status = xpsL3UnBindSubIntf(l3_intf->intf_id, l3_intf->l3_intf_id,
+                                    l3_intf->vlan_id);
+        if (status != XP_NO_ERR) {
+            VLOG_ERR("Failed to unbind VLAN %u for L3 sub-interface. Error: %d",
+                     l3_intf->vlan_id, status);
+        }
+
+        status = xpsL3DeInitSubIntf(ofproto->xpdev->id, l3_intf->l3_intf_id);
+        if (status != XP_NO_ERR) {
+            VLOG_ERR("Failed to de-initialize L3 sub-interface. Error: %d",
+                     status);
+        }
+
+        status = xpsL3DestroySubIntf(l3_intf->l3_intf_id);
+        if (status != XP_NO_ERR) {
+            VLOG_ERR("Failed to destroy L3 sub-interface. Error: %d",
+                     status);
+        }
+        break;
+    case XPS_VLAN_ROUTER:
+        status = xpsL3DestroyVlanIntf(l3_intf->vlan_id, l3_intf->l3_intf_id);
+        if (status != XP_NO_ERR) {
+            VLOG_ERR("Could not remove L3 interface. Error: %d", status);
+        }
+
+        status = xpsVlanSetArpBcCmd(ofproto->xpdev->id, l3_intf->vlan_id,
+                                    XP_PKTCMD_FWD);
+        if (status != XP_NO_ERR) {
+            VLOG_ERR("Failed to set ARP forward action for VLAN %u on Device %d",
+                     l3_intf->vlan_id, ofproto->xpdev->id);
+        }
+        break;
+    default:
+        /* do nothing, just free control structure */
+        break;
     }
 
     free(l3_intf);
+}
+
+void
+ops_xp_routing_update_l3_interface(struct ofproto_xpliant *ofproto,
+                                   xp_l3_intf_t *l3_intf)
+{
+    XP_STATUS status;
+    xpsInterfaceType_e l3_intf_type = XPS_PORT;
+    int rc;
+
+    ovs_assert(ofproto);
+    ovs_assert(l3_intf);
+
+    VLOG_INFO("%s: L3 interface ID 0x%08X, VLAN %u",
+              __FUNCTION__, l3_intf->l3_intf_id, l3_intf->vlan_id);
+
+    status = xpsInterfaceGetType(l3_intf->intf_id, &l3_intf_type);
+    if (status != XP_NO_ERR) {
+        VLOG_WARN("Failed to get interface type for interface %u",
+                  l3_intf->intf_id);
+    }
+
+    switch (l3_intf_type) {
+    case XPS_PORT_ROUTER:
+        status = xpsL3BindPortIntf(l3_intf->intf_id, l3_intf->l3_intf_id);
+        if (status != XP_NO_ERR) {
+            VLOG_ERR("Failed bind L3 port interface. Error: %d",
+                     status);
+        }
+
+        break;
+    case XPS_SUBINTERFACE_ROUTER:
+        status = xpsL3BindSubIntf(l3_intf->intf_id, l3_intf->l3_intf_id,
+                                  l3_intf->vlan_id);
+        if (status != XP_NO_ERR) {
+            VLOG_ERR("Failed bind VLAN %u for L3 sub-interface. Error: %d",
+                     l3_intf->vlan_id, status);
+        }
+        break;
+    case XPS_VLAN_ROUTER:
+    default:
+        /* do nothing */
+        break;
+    }
+
 }
 
 static xp_l3_intf_t *
@@ -1450,7 +1543,7 @@ l3_vlan_iface_create(struct ofproto_xpliant *ofproto,
         goto error;
     }
 
-    rc = l3_iface_mac_set(ofproto, l3_intf->l3_intf_id, mac);
+    rc = l3_iface_mac_set(ofproto, l3_intf->l3_intf_id, mac, vid);
     if (rc != 0) {
         VLOG_ERR("Failed to set MAC for L3 VLAN interface on VLAN %u", vid);
         goto error;
@@ -1463,6 +1556,155 @@ l3_vlan_iface_create(struct ofproto_xpliant *ofproto,
         goto error;
     }
 
+    l3_intf->intf_id = XPS_INTF_INVALID_ID;
+    l3_intf->l3_vrf = ofproto->vrf_id;
+    l3_intf->vlan_id = vid;
+
+    return l3_intf;
+
+error:
+
+    free(l3_intf);
+
+    return NULL;
+}
+
+static xp_l3_intf_t *
+l3_port_iface_create(struct ofproto_xpliant *ofproto, xpsInterfaceId_t if_id,
+                     macAddr_t mac)
+{
+    xp_l3_intf_t *l3_intf;
+    XP_STATUS status;
+    int rc;
+
+    l3_intf = xzalloc(sizeof *l3_intf);
+
+    status = xpsL3CreatePortIntf(&l3_intf->l3_intf_id);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to create L3 port interface. Error: %d",
+                 status);
+        goto error;
+    }
+
+    status = xpsL3InitPortIntf(ofproto->xpdev->id, l3_intf->l3_intf_id);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to initialize L3 port interface. Error: %d",
+                 status);
+        goto error;
+    }
+
+    status = xpsL3BindPortIntf(if_id, l3_intf->l3_intf_id);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed bind L3 port interface to port/LAG %u. Error: %d",
+                 if_id, status);
+        goto error;
+    }
+
+    status = xpsL3SetIntfVrf(ofproto->xpdev->id, l3_intf->l3_intf_id,
+                             ofproto->vrf_id);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to configure VRF index for L3 port interface. "
+                 "Error: %d", status);
+        goto error;
+    }
+
+    status = xpsL3SetIntfIpv4UcRoutingEn(ofproto->xpdev->id,
+                                         l3_intf->l3_intf_id, 1);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to enable IPv4 UC routing for L3 port interface. "
+                 "Error: %d", status);
+        goto error;
+    }
+
+    status = xpsL3SetIntfIpv6UcRoutingEn(ofproto->xpdev->id,
+                                         l3_intf->l3_intf_id, 1);
+    if (status) {
+        VLOG_ERR("Failed to enable IPv6 UC routing for L3 port interface. "
+                 "Error: %d", status);
+        goto error;
+    }
+
+    rc = l3_iface_mac_set(ofproto, l3_intf->l3_intf_id, mac, (xpsVlan_t)0);
+    if (rc != 0) {
+        VLOG_ERR("Failed to set MAC for L3 port interface");
+        goto error;
+    }
+
+    l3_intf->intf_id = if_id;
+    l3_intf->l3_vrf = ofproto->vrf_id;
+    l3_intf->vlan_id = (xpsVlan_t)0;
+
+    return l3_intf;
+
+error:
+
+    free(l3_intf);
+
+    return NULL;
+}
+
+static xp_l3_intf_t *
+l3_sub_iface_create(struct ofproto_xpliant *ofproto, xpsInterfaceId_t if_id,
+                    xpsVlan_t vid, macAddr_t mac)
+{
+    xp_l3_intf_t *l3_intf;
+    XP_STATUS status;
+    int rc;
+
+    l3_intf = xzalloc(sizeof *l3_intf);
+
+    status = xpsL3CreateSubIntf(&l3_intf->l3_intf_id);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to create L3 sub-interface. Error: %d",
+                 status);
+        goto error;
+    }
+
+    status = xpsL3InitSubIntf(ofproto->xpdev->id, l3_intf->l3_intf_id);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to initialize L3 sub-interface. Error: %d",
+                 status);
+        goto error;
+    }
+
+    status = xpsL3BindSubIntf(if_id, l3_intf->l3_intf_id, vid);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed bind VLAN %u for L3 sub-interface to port/LAG %u. "
+                 "Error: %d", vid, if_id, status);
+        goto error;
+    }
+
+    status = xpsL3SetIntfVrf(ofproto->xpdev->id, l3_intf->l3_intf_id,
+                             ofproto->vrf_id);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to configure VRF index for L3 sub-interface "
+                 "on VLAN %u. Error: %d", vid, status);
+        goto error;
+    }
+
+    status = xpsL3SetIntfIpv4UcRoutingEn(ofproto->xpdev->id,
+                                         l3_intf->l3_intf_id, 1);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to enable IPv4 UC routing for L3 sub-interface "
+                 "on VLAN %u. Error: %d", vid, status);
+        goto error;
+    }
+
+    status = xpsL3SetIntfIpv6UcRoutingEn(ofproto->xpdev->id,
+                                         l3_intf->l3_intf_id, 1);
+    if (status) {
+        VLOG_ERR("Failed to enable IPv6 UC routing for L3 sub-interface "
+                 "on VLAN %u. Error: %d", vid, status);
+        goto error;
+    }
+
+    rc = l3_iface_mac_set(ofproto, l3_intf->l3_intf_id, mac, vid);
+    if (rc != 0) {
+        VLOG_ERR("Failed to set MAC for L3 sub-interface on VLAN %u", vid);
+        goto error;
+    }
+
+    l3_intf->intf_id = if_id;
     l3_intf->l3_vrf = ofproto->vrf_id;
     l3_intf->vlan_id = vid;
 
@@ -1478,7 +1720,7 @@ error:
 xp_l3_intf_t *
 ops_xp_routing_enable_l3_interface(struct ofproto_xpliant *ofproto,
                                    xpsInterfaceId_t if_id, char *if_name, 
-                                   xpsVlan_t vid, macAddr_t mac)
+                                   macAddr_t mac)
 {
     XP_STATUS status;
     xpsInterfaceType_e if_type;
@@ -1486,10 +1728,9 @@ ops_xp_routing_enable_l3_interface(struct ofproto_xpliant *ofproto,
     int rc;
 
     ovs_assert(ofproto);
-    ovs_assert(ofproto->vlan_mgr);
 
-    VLOG_INFO("%s: Interface ID %u, VLAN %u, MAC "ETH_ADDR_FMT,
-              __FUNCTION__, if_id, vid, ETH_ADDR_BYTES_ARGS(mac));
+    VLOG_INFO("%s: Interface ID %u, MAC "ETH_ADDR_FMT,
+              __FUNCTION__, if_id, ETH_ADDR_BYTES_ARGS(mac));
 
     status = xpsInterfaceGetType(if_id, &if_type);
     if (status != XP_NO_ERR) {
@@ -1502,29 +1743,9 @@ ops_xp_routing_enable_l3_interface(struct ofproto_xpliant *ofproto,
         return NULL;
     }
 
-    rc = ops_xp_vlan_create(ofproto->vlan_mgr, vid);
-    if (rc) {
-        VLOG_ERR("Failed to create VLAN %u", vid);
-        return NULL;
-    }
-
-    l3_intf = l3_vlan_iface_create(ofproto, vid, mac);
+    l3_intf = l3_port_iface_create(ofproto, if_id, mac);
     if (l3_intf == NULL) {
-        VLOG_ERR("Failed to create L3 VLAN interface on VLAN %u", vid);
-        return NULL;
-    }
-
-    status = xpsVlanSetUnknownSaCmd(ofproto->xpdev->id, vid, XP_PKTCMD_FWD);
-    if (status != XP_NO_ERR) {
-        VLOG_ERR("Failed to disable SA learning for VLAN %u on Device %d",
-                 vid, ofproto->xpdev->id);
-        return NULL;
-    }
-
-    rc = ops_xp_vlan_member_add(ofproto->vlan_mgr, vid, if_id,
-                                XP_L2_ENCAP_DOT1Q_UNTAGGED, 0);
-    if (rc) {
-        VLOG_ERR("Failed to add Port %u to VLAN %u", if_id, vid);
+        VLOG_ERR("Failed to create L3 port interface");
         return NULL;
     }
 
@@ -1532,9 +1753,6 @@ ops_xp_routing_enable_l3_interface(struct ofproto_xpliant *ofproto,
     ops_xp_dev_add_intf_entry(ofproto->xpdev,
                               l3_intf->l3_intf_id,
                               if_name, 0);
-
-    l3_intf->vlan_intf = false;
-    l3_intf->intf_id = if_id;
 
     VLOG_DBG("%s: L3 interface ID 0x%08X", __FUNCTION__, l3_intf->l3_intf_id);
 
@@ -1568,31 +1786,9 @@ ops_xp_routing_enable_l3_subinterface(struct ofproto_xpliant *ofproto,
         return NULL;
     }
 
-    if (!ops_xp_vlan_is_existing(ofproto->vlan_mgr, vid)) {
-        rc = ops_xp_vlan_create(ofproto->vlan_mgr, vid);
-        if (rc) {
-            VLOG_ERR("Failed to create VLAN %u", vid);
-            return NULL;
-        }
-    }
-
-    l3_intf = l3_vlan_iface_create(ofproto, vid, mac);
+    l3_intf = l3_sub_iface_create(ofproto, if_id, vid, mac);
     if (l3_intf == NULL) {
         VLOG_ERR("Failed to create L3 VLAN interface on VLAN %u", vid);
-        return NULL;
-    }
-
-    status = xpsVlanSetUnknownSaCmd(ofproto->xpdev->id, vid, XP_PKTCMD_FWD);
-    if (status != XP_NO_ERR) {
-        VLOG_ERR("Failed to disable SA learning for VLAN %u on Device %d",
-                 vid, ofproto->xpdev->id);
-        return NULL;
-    }
-
-    rc = ops_xp_vlan_member_add(ofproto->vlan_mgr, vid, if_id,
-                                XP_L2_ENCAP_DOT1Q_TAGGED, 0);
-    if (rc) {
-        VLOG_ERR("Failed to add Port %u to VLAN %u", if_id, vid);
         return NULL;
     }
 
@@ -1600,9 +1796,6 @@ ops_xp_routing_enable_l3_subinterface(struct ofproto_xpliant *ofproto,
     ops_xp_dev_add_intf_entry(ofproto->xpdev,
                               l3_intf->l3_intf_id,
                               if_name, 0);
-
-    l3_intf->vlan_intf = false;
-    l3_intf->intf_id = if_id;
 
     VLOG_DBG("%s: L3 interface ID 0x%08X", __FUNCTION__, l3_intf->l3_intf_id);
 
@@ -1635,8 +1828,6 @@ ops_xp_routing_enable_l3_vlan_interface(struct ofproto_xpliant *ofproto,
     ops_xp_dev_add_intf_entry(ofproto->xpdev,
                               l3_intf->l3_intf_id,
                               if_name, 0);
-
-    l3_intf->vlan_intf = true;
 
     VLOG_DBG("%s: L3 interface ID 0x%08X", __FUNCTION__, l3_intf->l3_intf_id);
 
@@ -1909,11 +2100,13 @@ l3_test_routes(struct ofproto_xpliant *ofproto, const char *prefix,
 
         route_file = fopen(prefix, "r");
         if (!route_file) {
+            dbg->started = false;
             return;
         }
 
         if (!fscanf(route_file, "%u", &routes)) {
             fclose(route_file);
+            dbg->started = false;
             return;
         }
     } else {
@@ -1982,6 +2175,17 @@ l3_test_routes(struct ofproto_xpliant *ofproto, const char *prefix,
                 }
             } else {
                 ++(dbg->errors);
+            }
+
+            if (dbg->add_routes) {
+                uint32_t totally = dbg->errors + dbg->active_routes;
+
+                if (totally == 10000 || totally == 20000 || !(totally % 50000)) {
+                    VLOG_ERR("Totally routes (%u), Populated routes (%u), "
+                             "Skipped routes (%u), Execution time (%u.%06u seconds)",
+                             totally, dbg->active_routes,
+                             dbg->errors, dbg->exec_sec, dbg->exec_usec);
+                }
             }
 
             ovs_mutex_unlock(&ofproto->l3_mgr->mutex);

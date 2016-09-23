@@ -44,6 +44,8 @@ intf2 = 2
 intf3 = 3
 intf4 = 4
 
+SLEEP_TIME = 5
+
 def ping(result, wrkston, dst_ip):
 
     retStruct = wrkston.Ping(ipAddr=dst_ip, packetCount=5)
@@ -131,6 +133,7 @@ class Test_switchd_xpliant_fc_l3:
         wrkston02Obj = self.topoObj.deviceObjGet(device="wrkston02")
         print "Applying configurations...\n"
         sw_conf(dut01Obj)
+        sleep(SLEEP_TIME)
 
         command = "ifconfig " + wrkston01Obj.linkPortMapping['lnk01'] + " 10.1.1.2/24 up"
         returnStructure = wrkston01Obj.DeviceInteract(command=command)
@@ -157,8 +160,7 @@ class Test_switchd_xpliant_fc_l3:
         retCode = returnStructure.get('returnCode')
         assert retCode == 0, "Unable to add route on WS2"
 
-        sleep(7)
-
+        sleep(SLEEP_TIME)
         print "Executing ping commands...\n"
 
         ping("positive", wrkston01Obj, "20.1.1.2")
@@ -181,8 +183,8 @@ class Test_switchd_xpliant_fc_l3:
         wrkston02Obj = self.topoObj.deviceObjGet(device="wrkston02")
 
         print "Applying configurations...\n"
-
         sw_rout_conf(dut01Obj, dut02Obj)
+        sleep(SLEEP_TIME)
 
         command = "ifconfig " + wrkston01Obj.linkPortMapping['lnk01'] + " 1.1.1.2/24 up"
         returnStructure = wrkston01Obj.DeviceInteract(command=command)
@@ -220,7 +222,7 @@ class Test_switchd_xpliant_fc_l3:
         retCode = returnStructure.get('returnCode')
         assert retCode == 0, "Unable to add default gw on WS2"
 
-        sleep(10)
+        sleep(SLEEP_TIME)
         print "Executing ping commands...\n"
 
         ping("positive", wrkston01Obj, "3.3.3.2")

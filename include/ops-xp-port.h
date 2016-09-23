@@ -43,7 +43,6 @@ struct port_cfg {
 };
 
 struct xp_port_info {
-    char    *name;
     xpsDevice_t id;                 /* Xpliant device ID. */
     xpsPort_t port_num;             /* Device port number */
     bool hw_enable;

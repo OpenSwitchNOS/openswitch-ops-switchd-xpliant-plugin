@@ -41,7 +41,7 @@ intf2 = 2
 intf3 = 3
 intf4 = 4
 
-SLEEP_TIME = 3
+SLEEP_TIME = 5
 
 def base_switch_configuration(switch):
 
@@ -171,6 +171,7 @@ class Test_vlan_subinterface_testing:
         print "Applying configurations...\n"
 
         base_switch_configuration(dut01Obj)
+        sleep(SLEEP_TIME)
 
 
     def teardown_class(cls):

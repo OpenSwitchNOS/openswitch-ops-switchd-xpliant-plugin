@@ -32,6 +32,7 @@
 #include <time.h>
 #include <sys/time.h>
 
+#include "socket-util.h"
 #include "ops-xp-util.h"
 #include "ops-xp-host.h"
 #include "ops-xp-dev.h"
@@ -39,10 +40,6 @@
 #include "openXpsPacketDrv.h"
 #include "openXpsPort.h"
 
-#ifdef closesocket
-#undef closesocket
-#endif
-#include "socket-util.h"
 
 VLOG_DEFINE_THIS_MODULE(xp_host_tap);
 
