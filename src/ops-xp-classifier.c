@@ -338,12 +338,15 @@ ops_xp_cls_get_type(struct ops_cls_interface_info *interface_info,
 
         switch (interface_info->interface) {
         case OPS_CLS_INTERFACE_PORT:
-            tableType = ((interface_info->flags == OPS_CLS_INTERFACE_L3ONLY) ?
-                        XP_ACL_IACL2 : XP_ACL_IACL0);
+            tableType =  XP_ACL_IACL0;
             break;
 
         case OPS_CLS_INTERFACE_VLAN:
-            tableType = XP_ACL_IACL1;
+            if (interface_info->flags & OPS_CLS_INTERFACE_L3ONLY) {
+                tableType = XP_ACL_IACL2;
+            } else {
+                tableType = XP_ACL_IACL1;
+            }
             break;
 
         default:
@@ -1070,7 +1073,9 @@ ops_xp_cls_apply(struct ops_cls_list *list, struct ofproto *ofproto,
 
     ofproto_xp = ops_xp_ofproto_cast(ofproto);
     bundle = bundle_lookup(ofproto_xp, aux);
-    if (bundle == NULL) {
+    if ( (bundle == NULL) ||
+         ((bundle->l3_intf == NULL) &&
+         (interface_info->flags & OPS_CLS_INTERFACE_L3ONLY)) ) {
         VLOG_ERR("Failed to get port bundle/l3_intf not configured");
         return EPERM;
     }
@@ -1082,10 +1087,12 @@ ops_xp_cls_apply(struct ops_cls_list *list, struct ofproto *ofproto,
         return 0;
     }
 
-    if (interface_info->flags & OPS_CLS_INTERFACE_L3ONLY) {
-        VLOG_DBG("L3 interface value %d", bundle->l3_intf->l3_intf_id);
-    } else {
+    if (interface_info->interface == OPS_CLS_INTERFACE_PORT) {
         VLOG_DBG("Interface value %d", bundle->intfId);
+    } else if(interface_info->interface == OPS_CLS_INTERFACE_VLAN) {
+        if (interface_info->flags & OPS_CLS_INTERFACE_L3ONLY) {
+            VLOG_DBG("L3 interface value %d", bundle->l3_intf->l3_intf_id);
+        }
     }
 
     VLOG_DBG("key_failed_pacl = %d     key_failed_racl = %d",
@@ -1127,12 +1134,14 @@ ops_xp_cls_apply(struct ops_cls_list *list, struct ofproto *ofproto,
     }
 
     /* Update ingress ACLID for port and enable ACL on port */
-    if (interface_info->flags & OPS_CLS_INTERFACE_L3ONLY) {
-        xpsL3SetRouterAclId(ofproto_xp->xpdev->id, 
-                            bundle->l3_intf->l3_intf_id, acl_entry->acl_id);
-        xpsL3SetRouterAclEnable(ofproto_xp->xpdev->id,
-                                bundle->l3_intf->l3_intf_id, 0x1);
-    } else {
+    if (interface_info->interface == OPS_CLS_INTERFACE_VLAN) {
+        if (interface_info->flags & OPS_CLS_INTERFACE_L3ONLY) {
+            xpsL3SetRouterAclId(ofproto_xp->xpdev->id, 
+                                bundle->l3_intf->l3_intf_id, acl_entry->acl_id);
+            xpsL3SetRouterAclEnable(ofproto_xp->xpdev->id,
+                                    bundle->l3_intf->l3_intf_id, 0x1);
+        }
+    } else if (interface_info->interface == OPS_CLS_INTERFACE_PORT) {
 
         LIST_FOR_EACH_SAFE (port, next_port, bundle_node, &bundle->ports) {
             intf = ops_xp_get_ofport_intf_id(port);
@@ -1170,7 +1179,9 @@ ops_xp_cls_remove(const struct uuid *list_id, const char *list_name,
 
     ofproto_xp = ops_xp_ofproto_cast(ofproto);
     bundle = bundle_lookup(ofproto_xp, aux);
-    if (bundle == NULL) {
+    if ( (bundle == NULL) ||
+         ((bundle->l3_intf == NULL) &&
+         (interface_info->flags & OPS_CLS_INTERFACE_L3ONLY)) ) {
         VLOG_ERR("Failed to get port bundle/l3_intf not configured");
         return EPERM;
     }
@@ -1180,12 +1191,14 @@ ops_xp_cls_remove(const struct uuid *list_id, const char *list_name,
     if (acl_entry) {
 
         /* Update ingress ACLID for port and disble ACL on port */
-        if (interface_info->flags & OPS_CLS_INTERFACE_L3ONLY) {
-            xpsL3SetRouterAclId(ofproto_xp->xpdev->id, 
-                                bundle->l3_intf->l3_intf_id, 0x0);
-            xpsL3SetRouterAclEnable(ofproto_xp->xpdev->id,
+        if (interface_info->interface == OPS_CLS_INTERFACE_VLAN) {
+            if (interface_info->flags & OPS_CLS_INTERFACE_L3ONLY) {
+                xpsL3SetRouterAclId(ofproto_xp->xpdev->id, 
                                     bundle->l3_intf->l3_intf_id, 0x0);
-        } else {
+                xpsL3SetRouterAclEnable(ofproto_xp->xpdev->id,
+                                    bundle->l3_intf->l3_intf_id, 0x0);
+            }
+        } else if (interface_info->interface == OPS_CLS_INTERFACE_PORT) {
 
             LIST_FOR_EACH_SAFE (port, next_port, bundle_node, &bundle->ports) {
                 intf = ops_xp_get_ofport_intf_id(port);
@@ -1243,7 +1256,9 @@ ops_xp_cls_replace(const struct uuid *list_id_orig, const char *list_name_orig,
 
     ofproto_xp = ops_xp_ofproto_cast(ofproto);
     bundle = bundle_lookup(ofproto_xp, aux);
-    if (bundle == NULL) {
+    if ( (bundle == NULL) ||
+         ((bundle->l3_intf == NULL) &&
+         (interface_info->flags & OPS_CLS_INTERFACE_L3ONLY)) ) {
         VLOG_ERR("Failed to get port bundle/l3_intf not configured");
         return EPERM;
     }
@@ -1253,12 +1268,14 @@ ops_xp_cls_replace(const struct uuid *list_id_orig, const char *list_name_orig,
     if (acl_entry) {
 
         /* Update ingress ACLID for port and disble ACL on port*/
-        if (interface_info->flags & OPS_CLS_INTERFACE_L3ONLY) {
-            xpsL3SetRouterAclId(ofproto_xp->xpdev->id, 
-                                bundle->l3_intf->l3_intf_id, 0x0);
-            xpsL3SetRouterAclEnable(ofproto_xp->xpdev->id,
+        if (interface_info->interface == OPS_CLS_INTERFACE_VLAN) {
+            if (interface_info->flags & OPS_CLS_INTERFACE_L3ONLY) {
+                xpsL3SetRouterAclId(ofproto_xp->xpdev->id, 
                                     bundle->l3_intf->l3_intf_id, 0x0);
-        } else {
+                xpsL3SetRouterAclEnable(ofproto_xp->xpdev->id,
+                                    bundle->l3_intf->l3_intf_id, 0x0);
+            }
+        } else if (interface_info->interface == OPS_CLS_INTERFACE_PORT) {
             LIST_FOR_EACH_SAFE (port, next_port, bundle_node, &bundle->ports) {
                 intf = ops_xp_get_ofport_intf_id(port);
                 xpsPortSetField(ofproto_xp->xpdev->id, 
@@ -1298,12 +1315,14 @@ ops_xp_cls_replace(const struct uuid *list_id_orig, const char *list_name_orig,
 
         } else {
             /* Revert ingress ACLID for port and enable ACL on port */
-            if (interface_info->flags & OPS_CLS_INTERFACE_L3ONLY) {
-                xpsL3SetRouterAclId(ofproto_xp->xpdev->id, 
-                                    bundle->l3_intf->l3_intf_id, acl_entry->acl_id);
-                xpsL3SetRouterAclEnable(ofproto_xp->xpdev->id,
+            if (interface_info->interface == OPS_CLS_INTERFACE_VLAN) {
+                if (interface_info->flags & OPS_CLS_INTERFACE_L3ONLY) {
+                    xpsL3SetRouterAclId(ofproto_xp->xpdev->id, 
+                                        bundle->l3_intf->l3_intf_id, acl_entry->acl_id);
+                    xpsL3SetRouterAclEnable(ofproto_xp->xpdev->id,
                                         bundle->l3_intf->l3_intf_id, 0x1);
-            } else {
+                }
+            } else if (interface_info->interface == OPS_CLS_INTERFACE_PORT) {
 
                 LIST_FOR_EACH_SAFE (port, next_port, bundle_node, &bundle->ports) {
                     intf = ops_xp_get_ofport_intf_id(port);
