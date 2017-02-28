@@ -48,10 +48,6 @@ struct xp_mac_learning;
 /* Time, in seconds, before expiring a xp_mac_entry due to inactivity. */
 #define XP_ML_ENTRY_DEFAULT_IDLE_TIME 300
 
-/* Time, in seconds, to lock an entry updated by a gratuitous ARP to avoid
- * relearning based on a reflection from a bond slave. */
-#define XP_ML_GRAT_ARP_LOCK_TIME 5
-
 /* The buffers are defined as 2 in order to allow simultaneous read access to
  * bridge.c and ops-xp-mac-learning.c code from different threads.
  */
@@ -61,16 +57,7 @@ struct xp_mac_learning;
  * Guarded by owning 'xp_mac_learning''s rwlock */
 struct xp_mac_entry {
     struct hmap_node hmap_node; /* Node in a xp_mac_learning hmap. */
-    time_t grat_arp_lock;       /* Gratuitous ARP lock expiration time. */
     xpsFdbEntry_t xps_fdb_entry;
-
-    /* The following are marked guarded to prevent users from iterating over or
-     * accessing a xp_mac_entry without holding the parent xp_mac_learning rwlock. */
-    /* Learned port. */
-    union {
-        void *p;
-        ofp_port_t ofp_port;
-    } port OVS_GUARDED;
 };
 
 /* MAC learning table. */
@@ -118,22 +105,6 @@ struct xp_ml_event {
         xpsVlan_t vlan;
     } data;
 };
-
-/* Sets a gratuitous ARP lock on 'mac' that will expire in
- * XP_MAC_GRAT_ARP_LOCK_TIME seconds. */
-static inline void
-ops_xp_mac_entry_set_grat_arp_lock(struct xp_mac_entry *mac)
-{
-    mac->grat_arp_lock = time_now() + XP_ML_GRAT_ARP_LOCK_TIME;
-}
-
-/* Returns true if a gratuitous ARP lock is in effect on 'mac', false if none
- * has ever been asserted or if it has expired. */
-static inline bool
-ops_xp_mac_entry_is_grat_arp_locked(const struct xp_mac_entry *mac)
-{
-    return time_now() < mac->grat_arp_lock;
-}
 
 struct xp_mac_learning *ops_xp_mac_learning_create(struct xpliant_dev *xpdev,
                                                    unsigned int idle_time);
@@ -224,5 +195,7 @@ void ops_xp_mac_learning_on_idle_timer_expired(struct xp_mac_learning *ml);
 void ops_xp_mac_learning_on_mlearn_timer_expired(struct xp_mac_learning *ml);
 
 int ops_xp_mac_learning_hmap_get(struct mlearn_hmap **mhmap);
+
+int ops_xp_l2_addr_flush_handler(mac_flush_params_t *settings);
 
 #endif /* ops-xp-mac-learning.h */

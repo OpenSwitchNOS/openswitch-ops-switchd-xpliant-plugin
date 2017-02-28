@@ -55,6 +55,7 @@ struct asic_plugin_interface xpliant_interface = {
     .get_stg_port_state = &ops_xp_get_stg_port_state,
     .get_stg_default = &ops_xp_get_stg_default,
     .get_mac_learning_hmap = &ops_xp_mac_learning_hmap_get,
+    .l2_addr_flush = &ops_xp_l2_addr_flush_handler
 };
 
 static struct plugin_extension_interface xpliant_extension = {
@@ -123,6 +124,9 @@ static struct plugin_extension_interface cls_xpliant_extension = {
 void
 init(void)
 {
+    xpsDevice_t dev_id = 0;
+    struct xpliant_dev *xpdev;
+
     register_plugin_extension(&xpliant_extension);
     VLOG_INFO("The %s asic plugin interface was registered",
               ASIC_PLUGIN_INTERFACE_NAME);
@@ -138,6 +142,21 @@ init(void)
     register_plugin_extension(&cls_xpliant_extension);
     VLOG_INFO("The %s asic plugin interface was registered",
               OPS_CLS_ASIC_PLUGIN_INTERFACE_NAME);
+
+    /* Perform XDK initialization and start IPC server */
+    ops_xp_dev_srv_init();
+
+    /* Initialize XP device. */
+    for (;;) {
+        xpdev = ops_xp_dev_by_id(dev_id);
+        if (xpdev) {
+            if(!ops_xp_dev_is_initialized(xpdev)) {
+                ops_xp_dev_init(xpdev);
+            }
+            break;
+        }
+        ops_xp_msleep(100);
+    }
 }
 
 void

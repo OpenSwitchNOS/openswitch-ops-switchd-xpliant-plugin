@@ -197,6 +197,7 @@ ops_xp_set_stg_port_state(char *port_name, int stg, int stp_state,
     if (!ops_xp_get_hw_port_state_from_ops_state(stp_state, &hw_stp_state)) {
         VLOG_ERR("%s: Could not OPS STP state to HW state "
                  "for STG: %d port: %s.", __FUNCTION__, stg, port_name);
+        netdev_close(&netdev->up);
         return EFAULT;
     }
 
@@ -206,11 +207,14 @@ ops_xp_set_stg_port_state(char *port_name, int stg, int stp_state,
         VLOG_ERR("%s: Could not set XP STP state: %d for STG: %d port: %s. "
                  "Error: %d",
                  __FUNCTION__, hw_stp_state, stg, port_name, status);
+        netdev_close(&netdev->up);
         return EFAULT;
     }
 
     VLOG_INFO("%s: Set XP STP state: %d for STG: %d port: %s.",
               __FUNCTION__, hw_stp_state, stg, port_name);
+
+    netdev_close(&netdev->up);
 
     return 0;
 }
@@ -236,14 +240,18 @@ ops_xp_get_stg_port_state(char *port_name, int stg, int *p_stp_state)
     if (status != XP_NO_ERR) {
         VLOG_ERR("%s: Could not get STP state for STG: %d port: %s. Error: %d",
                  __FUNCTION__, stg, port_name, status);
+        netdev_close(&netdev->up);
         return EFAULT;
     }
 
     if (!ops_xp_get_ops_port_state_from_hw_state(hw_stp_state, p_stp_state)) {
         VLOG_ERR("%s: Could not convert HW STP state to OPS state "
                  "for STG: %d port: %s.", __FUNCTION__, stg, port_name);
+        netdev_close(&netdev->up);
         return EFAULT;
     }
+
+    netdev_close(&netdev->up);
 
     return 0;
 }

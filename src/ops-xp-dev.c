@@ -33,6 +33,8 @@
 #include "ops-xp-dev-init.h"
 #include "ops-xp-routing.h"
 #include "ops-xp-netdev.h"
+#include "ops-xp-classifier.h"
+#include "ops-xp-copp.h"
 #include <openvswitch/vlog.h>
 #include <ofproto/bond.h>
 #include "util.h"
@@ -49,8 +51,6 @@
 #include "dummy.h"
 
 VLOG_DEFINE_THIS_MODULE(xp_dev);
-
-#define XP_CPU_PORT_NUM                 135
 
 struct xp_if_id_to_name_entry {
     struct hmap_node hmap_node;       /* Node in if_id_to_name_map hmap. */
@@ -88,9 +88,6 @@ static struct xpliant_dev *gXpDev[XP_MAX_DEVICES];
 
 static xp_host_if_type_t host_if_type = XP_HOST_IF_TAP;
 static xpPacketInterface packet_if_type = XP_DMA;
-
-static const struct eth_addr eth_addr_lldp OVS_UNUSED
-    = { { { 0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E } } };
 
 static void *xp_dev_recv_handler(void *arg);
 static pthread_t xp_dev_event_handler_create(struct xpliant_dev *dev);
@@ -193,10 +190,11 @@ ops_xp_dev_is_initialized(const struct xpliant_dev *dev)
 static void
 ops_xp_dev_system_defaults_set(const struct xpliant_dev *dev)
 {
-    macAddr_t key_mac;
-    int error;
-    int i;
     XP_STATUS status;
+    macAddr_t key_mac;
+    xpsInterfaceId_t ifId;
+    int error;
+    uint8_t i;
 
     /* Set default port state. */
     for (i = 0; i < XP_MAX_TOTAL_PORTS; i++) {
@@ -221,47 +219,32 @@ ops_xp_dev_system_defaults_set(const struct xpliant_dev *dev)
                  "Error code: %d\n", __FUNCTION__, status);
     }
 
-    /* Update pVid on CPU port so we can send VLAN untagged packets
-     * from CPU (OFPP_LOCAL of OFPP_CONTROLLER) to start of pipeline */
-    error = ops_xp_port_default_vlan_set(dev->id, XP_CPU_PORT_NUM,
-                                         XP_DEFAULT_VLAN_ID);
-    if (error) {
-        VLOG_ERR("Unable to set default VLAN for CPU port");
+    for (i = 0; i < XP_MAX_TOTAL_PORTS; i++) {
+        /* Get interface ID for a given port */
+        status = xpsPortGetPortIntfId(dev->id, i, &ifId);
+        if (status != XP_NO_ERR) {
+            VLOG_ERR("%s: could not get port ifId for port #%u. Err=%d",
+                     __FUNCTION__, i, status);
+        }
+        /* Add the port to the default VLAN. This will allow it to trap LACP
+         * frames in case it becomes member of a dynamic LAG.*/
+        error = ops_xp_vlan_member_add(dev->vlan_mgr,
+                                       XP_DEFAULT_VLAN_ID, ifId,
+                                       XP_L2_ENCAP_DOT1Q_UNTAGGED, 0);
+        if (error) {
+            VLOG_ERR("%s: could not add interface: %u to default vlan: %d"
+                     "Err=%d", __FUNCTION__, ifId,
+                     XP_DEFAULT_VLAN_ID, error);
+        }
     }
 
     error = ops_xp_lag_set_balance_mode(dev->id, BM_L3_SRC_DST_HASH);
-    if (error != XP_NO_ERR) {
+    if (error) {
         VLOG_ERR("%s: Error in setting default LAG hash mode. "
                  "Error code: %d\n", __FUNCTION__, status);
     }
 
-    /* Configure control MAC for LACP packets in hardware.*/
-
-    /* XDK APIs use MAC in reverse order. */
-    ops_xp_mac_copy_and_reverse(key_mac, eth_addr_lacp.ea);
-
-    status = xpsVlanSetGlobalControlMac(dev->id, key_mac);
-    if (status != XP_NO_ERR) {
-        VLOG_ERR("%s: Error in inserting control MAC entry for LACP. "
-                 "Error code: %d\n", __FUNCTION__, status);
-    }
-
-    /* Configure control MAC for LLDP packets in hardware.*/
-    ops_xp_mac_copy_and_reverse(key_mac, eth_addr_lldp.ea);
-
-    status = xpsVlanSetGlobalControlMac(dev->id, key_mac);
-    if (status != XP_NO_ERR) {
-        VLOG_ERR("%s: Error in inserting control MAC entry for LLDP. "
-                 "Error code: %d\n", __FUNCTION__, status);
-    }
-
-    ops_xp_mac_copy_and_reverse(key_mac, eth_addr_stp.ea);
-
-    status = xpsVlanSetGlobalControlMac(dev->id, key_mac);
-    if (status != XP_NO_ERR) {
-        VLOG_ERR("%s: Error in inserting control MAC entry for STP. "
-                 "Error code: %d\n", __FUNCTION__, status);
-    }
+    ops_xp_copp_init(dev->id);
 }
 
 int
@@ -335,6 +318,12 @@ ops_xp_dev_init(struct xpliant_dev *dev)
         VLOG_ERR("Unable to create mac learning feature");
         goto error;
     }
+
+    /* L3 initialization */
+    ops_xp_l3_init(dev->id);
+
+    /* ACL related initialization */
+    ops_xp_cls_init(dev->id);
 
     /* Register fatal signal handler. */
     fatal_signal_add_hook(cleanup_cb, NULL, &gXpDev[dev->id], true);
@@ -480,11 +469,12 @@ ops_xp_dev_send(xpsDevice_t xp_dev_id, xpsInterfaceId_t dst_if_id,
     pktInfo.priority = priority = 0;
     priority = (priority + 1) % 64;     /* 64 - MAX_TX_QUEUES */
 
-    /* Add Tx header to the packet. */
-    xpsPacketDriverCreateHeader(xp_dev_id, &pktInfo, src_vif, dst_vif, true);
-
     /* Copy payload of the packet. */
     memcpy(pktInfo.buf + xp_tx_hdr_size , buff, buff_size);
+
+    /* Add Tx header to the packet. */
+    xpsPacketDriverCreateHeader(xp_dev_id, &pktInfo, src_vif, dst_vif,
+                                (dst_if_id != cpu_if_id));
 
     /* Pad the packet with zeroes to 64 byte length */
     if (buff_size < 64) {

@@ -30,9 +30,9 @@
 #include "ops-xp-host.h"
 #include "ops-xp-dev.h"
 #include "ops-xp-dev-init.h"
+#include "ops-xp-copp.h"
 #include "openXpsPacketDrv.h"
 #include "openXpsPort.h"
-#include "openXpsReasonCodeTable.h"
 
 VLOG_DEFINE_THIS_MODULE(xp_host_netdev);
 
@@ -44,6 +44,11 @@ typedef enum xp_host_if_trap_channel {
     XP_HOST_IF_TRAP_CHANNEL_NETDEV, /* Receive packets via OS net device  */
     XP_HOST_IF_TRAP_CHANNEL_CUSTOM_RANGE_BASE = 0x10000000
 } xp_host_if_trap_channel_t;
+
+typedef enum xp_host_if_netdev_mode {
+    XP_HOST_IF_NETDEV_MODE_1,
+    XP_HOST_IF_NETDEV_MODE_2,
+} xp_host_if_netdev_mode_t;
 
 static int netdev_init(struct xpliant_dev *xp_dev);
 static int netdev_if_create(struct xpliant_dev *xp_dev, char *intf_name,
@@ -75,11 +80,16 @@ netdev_init(struct xpliant_dev *xp_dev)
     uint32_t i = 0;
     uint32_t list_of_rc[] = {
         XP_IVIF_RC_BPDU,
+        XP_IVIF_RC_LLDP,
+        XP_IVIF_RC_LACP,
+        XP_IVIF_RC_STP_BPDU,
         XP_BRIDGE_RC_IVIF_ARPIGMPICMP_CMD,
         XP_ROUTE_RC_HOST_TABLE_HIT,
+        XP_ROUTE_RC_UC_TABLE_MISS,
         XP_ROUTE_RC_NH_TABLE_HIT,
         XP_ROUTE_RC_ROUTE_NOT_POSSIBLE,
         XP_ROUTE_RC_TTL1_OR_IP_OPTION,
+        XP_ROUTE_RC_ARP_MY_UNICAST,
     };
 
     for (i = 0; i < ARRAY_SIZE(list_of_rc); i++) {
@@ -88,6 +98,12 @@ netdev_init(struct xpliant_dev *xp_dev)
             VLOG_ERR("%s, Unable to install a trap.", __FUNCTION__);
             return EFAULT;
         }
+    }
+
+    if (XP_NO_ERR != xpsNetdevProcessingModeSet(xp_dev->id,
+                                                XP_HOST_IF_NETDEV_MODE_2)) {
+        VLOG_ERR("%s, Unable to set netdev processing mode.", __FUNCTION__);
+        return EFAULT;
     }
 
     return 0;
@@ -109,7 +125,7 @@ netdev_if_create(struct xpliant_dev *xp_dev, char *intf_name,
 
     if (XP_NO_ERR != xpsNetdevIfCreate(xp_dev->id, xpnetId, intf_name)) {
         VLOG_ERR("%s, Unable to create interface: %u, %s",
-                 __FUNCTION__ ,xps_if_id, intf_name);
+                 __FUNCTION__ , xps_if_id, intf_name);
         return EPERM;
     }
 
@@ -185,7 +201,7 @@ netdev_if_control_id_set(struct xpliant_dev *xp_dev,
     if (set) {
         status = xpsInterfaceGetType(xps_if_id, &if_type);
         if (status != XP_NO_ERR) {
-            VLOG_ERR("%s, Failed to get interface type. Error: %d", 
+            VLOG_ERR("%s, Failed to get interface type. Error: %d",
                      __FUNCTION__, status);
             return EPERM;
         }

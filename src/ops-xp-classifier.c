@@ -129,6 +129,7 @@ ops_xp_alloc_reset_field_data(xpsIaclkeyFieldList_t **field_new,
     uint32_t                byteMask[OPS_XP_IACL_V4_MAX_FIELDS] = {0,};
     uint8_t                 field_size;
     uint8_t                 rem;
+    int                     i;
 
     field = malloc(sizeof(xpsIaclkeyFieldList_t));
     memset(field, 0x0, sizeof(xpsIaclkeyFieldList_t));
@@ -138,11 +139,11 @@ ops_xp_alloc_reset_field_data(xpsIaclkeyFieldList_t **field_new,
     /* allocate memory for data */
     iaclData = malloc(sizeof(xpsIaclData_t));
     memset(iaclData, 0x0, sizeof(xpsIaclData_t));
-       
+
     field->numFlds = OPS_XP_IACL_V4_MAX_FIELDS;
     field->isValid = 0x0;
     field->type = XP_IACL_V4_TYPE;
-    for (int i= 0; i <OPS_XP_IACL_V4_MAX_FIELDS; i++) {
+    for (i = 0; i < OPS_XP_IACL_V4_MAX_FIELDS; i++) {
 
         field->fldList[i].fld.v4Fld = iacl_key_v4[i].v4_field;
         byteMask[i] = iaclV4KeyByteMask[iacl_key_v4[i].v4_field];
@@ -192,10 +193,7 @@ ops_xp_acl_table_init(xpsDevice_t devId)
     xpsIaclData_t           *iaclData_pacl, *iaclData_bacl, *iaclData_racl;
     XP_STATUS               status = XP_NO_ERR;
 
-    VLOG_DBG("%s", __FUNCTION__);
-
-    VLOG_DBG("Initializing ACL tables %s", __FUNCTION__);
-
+    VLOG_DBG("%s: Initializing ACL tables", __FUNCTION__);
 
     /* Populate table profiles data */
     tableProfile.numTables = XP_IACL_TOTAL_TYPE;
@@ -221,7 +219,7 @@ ops_xp_acl_table_init(xpsDevice_t devId)
     ops_xp_alloc_reset_field_data(&fields_pacl, &iaclData_pacl);
     fields_pacl->isValid = 0x1;
     status = xpsIaclDefinePaclKey(devId, XP_IACL_V4_TYPE, fields_pacl);
-    
+
     if (status != XP_NO_ERR) {
         key_failed_pacl = 1;
     }
@@ -245,19 +243,15 @@ ops_xp_acl_table_init(xpsDevice_t devId)
 }
 
 int
-ops_xp_cls_init(xpsDevice_t dev)
+ops_xp_cls_init(xpsDevice_t devId)
 {
-    xpsDevice_t devId; 
-    XP_STATUS   status;
-
-    devId = dev;
-
-    VLOG_DBG("%s", __FUNCTION__);
+    XP_STATUS status = XP_NO_ERR;
 
     /* Classifier related initializations */
+    VLOG_DBG("%s", __FUNCTION__);
+
     /* Creating and configuring TCAM Manager tables for IACLs and EACL */
     VLOG_DBG("Initializing TCAM Manager and hmap %s", __FUNCTION__);
-    status = XP_NO_ERR;
 
     /* Port IACL */
     status = xpsTcamMgrAddTable(devId, XP_ACL_IACL0, XPS_TCAM_LIST_ALGORITHM);
@@ -265,7 +259,7 @@ ops_xp_cls_init(xpsDevice_t dev)
         VLOG_INFO("xpsTcamMgrAddTable failed with error code %d, "
                   "for table type  %s", status, XP_ACL_IACL0);
     }
-    
+
     status = xpsTcamMgrConfigTable(devId, XP_ACL_IACL0, &xpsTcamMgrRuleMoveAcl, 512, 16);
     if (status != XP_NO_ERR) {
         VLOG_INFO("xpsTcamMgrConfigTable failed with error code %d, "
@@ -319,6 +313,8 @@ ops_xp_cls_init(xpsDevice_t dev)
     hmap_init(&classifier_hmap_bacl);
     hmap_init(&classifier_hmap_racl);
     VLOG_DBG("Init complete TCAM Manager and hmap %s", __FUNCTION__);
+
+    return 0;
 }
 
 /*
@@ -413,7 +409,7 @@ ops_xp_cls_hmap_lookup(const struct uuid *cls_uid,
  */
 struct xp_acl_entry*
 ops_xp_cls_lookup_from_hmap_type(const struct uuid *cls_uid, 
-                       struct hmap *classifier_hmap)
+                                 struct hmap *classifier_hmap)
 
 {
     uint32_t                hash_id;
@@ -518,7 +514,7 @@ ops_xp_cls_populate_iacl_entires(struct ops_cls_list_entry *entry,
 
         memcpy(field->fldList[OPS_XP_IACL_DIP_V4].mask, 
                &dip_mask, iacl_key_v4[OPS_XP_IACL_DIP_V4].size);
-        }
+    }
 
     /* Populate L4 SRC DST PORT */
 
@@ -646,7 +642,7 @@ ops_xp_cls_populate_iacl_entires(struct ops_cls_list_entry *entry,
 /*
  * create rule id list for a classifier
  */
-struct ops_cls_pd_status *
+static struct ops_cls_pd_status
 ops_xp_cls_create_rule_entry_list(struct xp_acl_entry *classifier,
                                   struct ops_cls_list *cls_list,
                                   struct ovs_list *list)
@@ -654,32 +650,32 @@ ops_xp_cls_create_rule_entry_list(struct xp_acl_entry *classifier,
     uint32_t                 tableId;
     uint32_t                 tcamId;
     xpAclType_e              tableType;
-    xpDevice_t               devId;
+    xpDevice_t               devId = 0;
     XP_STATUS                status;
-    struct ops_cls_pd_status *ops_status;
+    struct ops_cls_pd_status pd_status;
     xpsIaclData_t            *iaclData;
     xpsIaclkeyFieldList_t    *field;
-
-    devId = 0;
+    int                      i;
 
     VLOG_DBG("%s", __FUNCTION__);
+
+    pd_status.status_code = OPS_CLS_STATUS_SUCCESS;
+    pd_status.entry_id = 0;
 
     /* Get type ACL */
     tableType = ops_xp_cls_get_type(&classifier->intf_info, classifier->cls_direction);
 
     /* Get tableId from tableType */
-
     tableId = tableType;
 
     /* For each entry in the classifier entries list, create a local copy and
      * store its link in local list
      */
-
     classifier->num_rules = cls_list->num_entries;
 
-    VLOG_DBG("Number of entries needs to be programmed %d", cls_list->num_entries);
+    VLOG_DBG("Number of entries needs to be programmed %u", cls_list->num_entries);
 
-    for (int i = 0; i < cls_list->num_entries; i++) {
+    for (i = 0; i < cls_list->num_entries; i++) {
         struct xp_acl_rule  *entry;
         uint32_t            rule_index;
         uint32_t            priority;
@@ -692,7 +688,7 @@ ops_xp_cls_create_rule_entry_list(struct xp_acl_entry *classifier,
 
         entry->rule_id = rule_index;
         entry->counter_en = 0;
-        
+
         /* Update count enable filed */
         if (cls_list->entries[i].entry_actions.action_flags & OPS_CLS_ACTION_COUNT) {
             entry->counter_en = 1;
@@ -703,7 +699,7 @@ ops_xp_cls_create_rule_entry_list(struct xp_acl_entry *classifier,
 
         /* Get hw tcamId from rule entry index */
         status = xpsTcamMgrTcamIdFromEntryGet(devId, tableId, rule_index, &tcamId);
-        VLOG_DBG("allocated tcam RuleId %d, HW tcam Index %d", rule_index, tcamId);
+        VLOG_DBG("allocated tcam RuleId %u, HW tcam Index %u", rule_index, tcamId);
 
         /* Populate entry in filed list to program in hw */
         ops_xp_alloc_reset_field_data(&field, &iaclData);
@@ -718,7 +714,7 @@ ops_xp_cls_create_rule_entry_list(struct xp_acl_entry *classifier,
         memset(field->fldList[OPS_XP_IACL_ID].value, classifier->acl_id, sizeof(uint8_t));
         memset(field->fldList[OPS_XP_IACL_ID].mask, 0x0, sizeof(uint8_t));
 
-        VLOG_DBG("Installing in HW table %d, HWID: %d", tableId, tcamId);
+        VLOG_DBG("Installing in HW table %u, HWID: %u", tableId, tcamId);
 
         switch (tableId) {
 
@@ -752,7 +748,7 @@ ops_xp_cls_create_rule_entry_list(struct xp_acl_entry *classifier,
                 VLOG_DBG("xpsIaclRritePaclKey failed with error %d", status);
             }
 
-            xpsIaclWriteRaclData(devId, tcamId, iaclData);
+            status = xpsIaclWriteRaclData(devId, tcamId, iaclData);
             if (status != XP_NO_ERR) {
                 VLOG_DBG("xpsIaclRritePaclData failed with error %d", status);
             }
@@ -767,6 +763,8 @@ ops_xp_cls_create_rule_entry_list(struct xp_acl_entry *classifier,
          */
         ops_xp_free_field_data(field, iaclData);
     }
+
+    return pd_status;
 }
 
 
@@ -781,7 +779,7 @@ ops_xp_cls_destroy_rule_entry_list(struct xp_acl_entry *classifier)
     xpAclType_e             tableType;
     struct xp_acl_rule      *entry, *next_entry;
     struct ovs_list         *list;
-    xpDevice_t              devId;
+    xpDevice_t              devId = 0;
     xpsIaclData_t           *iaclData;
     xpsIaclkeyFieldList_t   *field;
     XP_STATUS               status;
@@ -789,7 +787,6 @@ ops_xp_cls_destroy_rule_entry_list(struct xp_acl_entry *classifier)
     VLOG_DBG("%s", __FUNCTION__);
 
     list = &classifier->rule_list;
-    devId = 0;
 
     /* Get type ACL */
     tableType = ops_xp_cls_get_type(&classifier->intf_info, classifier->cls_direction);
@@ -824,11 +821,11 @@ ops_xp_cls_destroy_rule_entry_list(struct xp_acl_entry *classifier)
             break;
         }
 
+        ops_xp_free_field_data(field, iaclData);
         /* Free entry from tcam manager */
         xpsTcamMgrFreeEntry(devId, tableId, entry->rule_id);
         list_remove(&entry->list_node);
         free(entry);
-
     }
 }
 
@@ -836,33 +833,27 @@ ops_xp_cls_destroy_rule_entry_list(struct xp_acl_entry *classifier)
 /*
  * Add the acl rules meta data to HMAP
  */
-struct ops_cls_pd_status *
+struct ops_cls_pd_status
 ops_xp_cls_acl_add(struct ops_cls_list *cls,
                    struct xp_acl_entry* acl_entry)
 {
     uint32_t                    hash_index;
     uint8_t                     acl_id;
-    struct ops_cls_pd_status    *status; 
+    struct ops_cls_pd_status    pd_status;
     xpAclType_e                 acl_type;
-    xpsDevice_t                 devId;
-    uint8_t                     allocated=0;
+    xpsDevice_t                 devId = 0;
+    uint8_t                     allocated = 0;
     uint32_t                    hash_id;
     struct xp_acl_entry         *classifier;
 
     VLOG_DBG("%s", __FUNCTION__);
 
+    pd_status.status_code = OPS_CLS_STATUS_SUCCESS;
+    pd_status.entry_id = 0;
+
     if (cls == NULL) {
-        return NULL;
+        return pd_status;
     }
-
-    /* Set status to default */
-    status = malloc(sizeof(struct ops_cls_pd_status));
-    if (!status) {
-        return NULL;
-    }
-
-    status->status_code = OPS_CLS_STATUS_SUCCESS;
-    status->entry_id = 0;
 
     /* Populate acl entry to store it in HMAP */
     acl_entry->list_uid = cls->list_id;
@@ -871,7 +862,6 @@ ops_xp_cls_acl_add(struct ops_cls_list *cls,
      * should not be reallocated if already allocated to
      * PACL or RACL or BACL for same UUID then reuse it
      */
-    devId = 0;
 
     /* Get hash id from uid */
     hash_id = uuid_hash(&cls->list_id);
@@ -879,7 +869,7 @@ ops_xp_cls_acl_add(struct ops_cls_list *cls,
     /* Search in PACL */
     HMAP_FOR_EACH_WITH_HASH(classifier, hnode, hash_id, &classifier_hmap_pacl) {
         if (uuid_equals(&classifier->list_uid, &cls->list_id)) {
-            allocated =1;
+            allocated = 1;
             acl_id = classifier->acl_id;
             VLOG_DBG("Allocated ACLID %d in PACL HMAP", acl_id);
         }
@@ -910,7 +900,7 @@ ops_xp_cls_acl_add(struct ops_cls_list *cls,
         acl_entry->acl_id = acl_id;
     } else {
         if (xpsAclIdAllocEntry(devId, &acl_id) != XP_NO_ERR) {
-            status->status_code = OPS_CLS_STATUS_HW_RESOURCE_ERR;
+            pd_status.status_code = OPS_CLS_STATUS_HW_RESOURCE_ERR;
         }
         acl_entry->acl_id = acl_id;
     }
@@ -946,7 +936,7 @@ ops_xp_cls_acl_add(struct ops_cls_list *cls,
 
     }
 
-    return status;
+    return pd_status;
 }
 
 void
@@ -954,12 +944,12 @@ ops_xp_cls_acl_delete(struct xp_acl_entry *acl_entry,
                       char *list_name,
                       struct hmap *classifier_hmap)
 {
-    uint8_t             allocated=0;
+    uint8_t             allocated = 0;
     uint8_t             acl_id;
     struct xp_acl_entry *classifier;
     uint32_t            hash_id;
     struct uuid         list_uid;
-    xpsDevice_t         devId=0;
+    xpsDevice_t         devId = 0;
 
     VLOG_DBG("%s", __FUNCTION__);
     if (acl_entry == NULL) {
@@ -1027,9 +1017,11 @@ ops_xp_cls_acl_delete(struct xp_acl_entry *acl_entry,
 
 void
 ops_xp_cls_validate_entries(struct ops_cls_list *list,
-                            struct ops_cls_pd_status **pd_status)
+                            struct ops_cls_pd_status *pd_status)
 {
-    for (int i = 0; i < list->num_entries; i++) {
+    int i;
+
+    for (i = 0; i < list->num_entries; i++) {
         struct ops_cls_list_entry *entry;
 
         entry = &list->entries[i];
@@ -1038,8 +1030,8 @@ ops_xp_cls_validate_entries(struct ops_cls_list *list,
             (entry->entry_fields.L4_src_port_op == OPS_CLS_L4_PORT_OP_GT) ||
             (entry->entry_fields.L4_src_port_op == OPS_CLS_L4_PORT_OP_RANGE)) {
 
-            (*pd_status)->status_code = OPS_CLS_STATUS_HW_UNSUPPORTED_ERR;
-            (*pd_status)->entry_id = i;
+            pd_status->status_code = OPS_CLS_STATUS_HW_UNSUPPORTED_ERR;
+            pd_status->entry_id = i;
         }
 
         if ((entry->entry_fields.L4_dst_port_op == OPS_CLS_L4_PORT_OP_NEQ) ||
@@ -1047,8 +1039,8 @@ ops_xp_cls_validate_entries(struct ops_cls_list *list,
             (entry->entry_fields.L4_dst_port_op  == OPS_CLS_L4_PORT_OP_GT) ||
             (entry->entry_fields.L4_dst_port_op  == OPS_CLS_L4_PORT_OP_RANGE)) {
 
-            (*pd_status)->status_code = OPS_CLS_STATUS_HW_UNSUPPORTED_ERR;
-            (*pd_status)->entry_id = i;
+            pd_status->status_code = OPS_CLS_STATUS_HW_UNSUPPORTED_ERR;
+            pd_status->entry_id = i;
         }
     }
 }
@@ -1081,7 +1073,7 @@ ops_xp_cls_apply(struct ops_cls_list *list, struct ofproto *ofproto,
     }
 
     /* Validate unsupported parameters */
-    ops_xp_cls_validate_entries(list, &pd_status);
+    ops_xp_cls_validate_entries(list, pd_status);
 
     if (pd_status->status_code == OPS_CLS_STATUS_HW_UNSUPPORTED_ERR) {
         return 0;
@@ -1114,8 +1106,7 @@ ops_xp_cls_apply(struct ops_cls_list *list, struct ofproto *ofproto,
                sizeof(struct ops_cls_interface_info));
         acl_entry->cls_direction = direction;
 
-        pd_status = ops_xp_cls_acl_add(list, acl_entry);
-
+        *pd_status = ops_xp_cls_acl_add(list, acl_entry);
     } else {
         int i = 0;
 
@@ -1156,6 +1147,7 @@ ops_xp_cls_apply(struct ops_cls_list *list, struct ofproto *ofproto,
 
     /* Keep track of acl enabled interface count */
     acl_entry->num_intfs++;
+
     return 0;
 }
 
@@ -1233,6 +1225,7 @@ ops_xp_cls_remove(const struct uuid *list_id, const char *list_name,
             ops_xp_cls_acl_delete(acl_entry, (char *)list_name, classifier_hmap);
         }
     }
+
     return 0;
 }
 
@@ -1336,6 +1329,7 @@ ops_xp_cls_replace(const struct uuid *list_id_orig, const char *list_name_orig,
 
         }
     }
+
     return 0;
 }
 
@@ -1348,7 +1342,7 @@ ops_xp_cls_list_update(struct ops_cls_list *list,
     uint8_t                     failed_pacl, failed_racl;
     struct ovs_list             pacl_new_list, racl_new_list;
     struct ovs_list             pacl_old_list, racl_old_list;
-    struct ops_cls_pd_status    *pd_status;
+    struct ops_cls_pd_status    pd_status;
 
     VLOG_DBG("%s", __FUNCTION__);
 
@@ -1358,19 +1352,21 @@ ops_xp_cls_list_update(struct ops_cls_list *list,
     failed_pacl = 0;
     failed_racl = 0;
 
-    pd_status = malloc(sizeof(struct ops_cls_pd_status));
+    status->status_code = OPS_CLS_STATUS_SUCCESS;
+    status->entry_id = 0;
 
     /* Validate unsupported parameters */
     ops_xp_cls_validate_entries(list, &pd_status);
 
-    if (pd_status->status_code == OPS_CLS_STATUS_HW_UNSUPPORTED_ERR) {
-        status->status_code = OPS_CLS_STATUS_HW_UNSUPPORTED_ERR;
+    if (pd_status.status_code == OPS_CLS_STATUS_HW_UNSUPPORTED_ERR) {
+        status->status_code = pd_status.status_code;
+        status->entry_id = pd_status.entry_id;
         return 0;
     }
 
     /* Check if PACL needs to be updated and update if needed */
-    acl_entry_pacl = ops_xp_cls_lookup_from_hmap_type(&list->list_id, &classifier_hmap_pacl);
-
+    acl_entry_pacl = ops_xp_cls_lookup_from_hmap_type(&list->list_id,
+                                                      &classifier_hmap_pacl);
     if (acl_entry_pacl) {
 
         pacl_old_list = acl_entry_pacl->rule_list;
@@ -1384,7 +1380,9 @@ ops_xp_cls_list_update(struct ops_cls_list *list,
             acl_entry_pacl->rule_list = pacl_new_list;
             updated_pacl = 1;
 
-            if (pd_status != OPS_CLS_STATUS_SUCCESS) {
+            if (pd_status.status_code != OPS_CLS_STATUS_SUCCESS) {
+                status->status_code = pd_status.status_code;
+                status->entry_id = pd_status.entry_id;
                 failed_pacl = 1;
             }
         }
@@ -1393,7 +1391,6 @@ ops_xp_cls_list_update(struct ops_cls_list *list,
     /* Check if RACL needs to be updated and update if needed */
     acl_entry_racl = ops_xp_cls_lookup_from_hmap_type(&list->list_id,
                                                       &classifier_hmap_racl);
-    
     if (acl_entry_racl) {
 
         racl_old_list = acl_entry_racl->rule_list;
@@ -1403,11 +1400,15 @@ ops_xp_cls_list_update(struct ops_cls_list *list,
 
             pd_status = ops_xp_cls_create_rule_entry_list(acl_entry_racl, list,
                                                           &racl_new_list);
-                
+
             acl_entry_racl->rule_list = racl_new_list;
             updated_racl = 1;
 
-            if (pd_status != OPS_CLS_STATUS_SUCCESS) {
+            if (pd_status.status_code != OPS_CLS_STATUS_SUCCESS) {
+                if (!failed_pacl) {
+                    status->status_code = pd_status.status_code;
+                    status->entry_id = pd_status.entry_id;
+                }
                 failed_racl = 1;
             }
         }
@@ -1417,13 +1418,12 @@ ops_xp_cls_list_update(struct ops_cls_list *list,
         /* We are trying to update a  non existing Classifier
          * hence returning invalid configuration
          */
-
         status->status_code = OPS_CLS_STATUS_HW_CONFIG_ERR;
+        status->entry_id = 0;
         return 0;
     }
 
     if (failed_pacl || failed_racl) {
-
         if (updated_pacl) {
             /* Destroy new ACLlist and add old list to ACL */
             ops_xp_cls_destroy_rule_entry_list(acl_entry_pacl);
@@ -1439,11 +1439,7 @@ ops_xp_cls_list_update(struct ops_cls_list *list,
             /* Update it to old value */
             acl_entry_racl->rule_list = racl_old_list;
         }
-
-        status->status_code = OPS_CLS_STATUS_HW_CONFIG_ERR;
-
     } else {
-    
         if (updated_pacl) {
             /* The API to destroy expects all the info in ACL entry
              * so first assign old list to the entry, destroy the list and
@@ -1453,7 +1449,7 @@ ops_xp_cls_list_update(struct ops_cls_list *list,
             ops_xp_cls_destroy_rule_entry_list(acl_entry_pacl);
 
             acl_entry_pacl->rule_list = pacl_new_list;
-            
+
             /* updating new lists first node and last node propely with base
              * list pointer, so that circular linked list is updated properly
              */
@@ -1478,6 +1474,7 @@ ops_xp_cls_list_update(struct ops_cls_list *list,
             racl_new_list.prev->next = &acl_entry_racl->rule_list;
         }
     }
+
     return 0;
 }
 
@@ -1489,10 +1486,9 @@ ops_xp_cls_stats_get(const struct uuid *list_id, const char *list_name,
                      struct ops_cls_statistics *statistics,
                      int num_entries, struct ops_cls_pd_list_status *status)
 {
-    
     xpAclType_e         acl_type;
     xpAcmClient_e       client;
-    xpsDevice_t         devId;
+    xpsDevice_t         devId = 0;
     struct hmap         *classifier_hmap;
     uint8_t             invalid_iacl_type;
     struct xp_acl_entry *acl_entry;
@@ -1500,16 +1496,15 @@ ops_xp_cls_stats_get(const struct uuid *list_id, const char *list_name,
     struct xp_acl_rule  *entry, *next_entry;
     uint32_t            tcamId;
     uint64_t            count_pkts, count_bytes;
+    uint32_t            tableId;
 
     VLOG_DBG("%s", __FUNCTION__);
-    
+
     /* currently we support statistics based on the ACL type only
      * i.e per ACE statistics available for L2 port, L3 port and Vlan
      * interface. we can not support per port per ACE basis as per HW
      * limitation
      */
-
-    devId = 0;
     invalid_iacl_type = 0;
 
     acl_type = ops_xp_cls_get_type(interface_info, direction);
@@ -1518,16 +1513,19 @@ ops_xp_cls_stats_get(const struct uuid *list_id, const char *list_name,
     case XP_ACL_IACL0:
         classifier_hmap = &classifier_hmap_pacl;
         client = XP_ACM_IPACL_COUNTER;
+        tableId = XP_ACL_IACL0;
         break;
 
     case XP_ACL_IACL1:
         classifier_hmap = &classifier_hmap_bacl;
         client = XP_ACM_IBACL_COUNTER;
+        tableId = XP_ACL_IACL1;
         break;
 
     case XP_ACL_IACL2:
         classifier_hmap = &classifier_hmap_racl;
         client = XP_ACM_IRACL_COUNTER;
+        tableId = XP_ACL_IACL2;
         break;
 
     default:
@@ -1535,7 +1533,7 @@ ops_xp_cls_stats_get(const struct uuid *list_id, const char *list_name,
         break;
 
     }
-    
+
     if (invalid_iacl_type) {
         /* update status and return */
         return 0;
@@ -1543,12 +1541,12 @@ ops_xp_cls_stats_get(const struct uuid *list_id, const char *list_name,
 
     acl_entry = ops_xp_cls_lookup_from_hmap_type(list_id,
                                                  classifier_hmap);
-    
+
     if (acl_entry) {
-        
+
         int i = 0;
         ovslist = &acl_entry->rule_list;
-        
+
         if (num_entries+1 != acl_entry->num_rules) {
             /* update status and return */
             return 0;
@@ -1559,11 +1557,11 @@ ops_xp_cls_stats_get(const struct uuid *list_id, const char *list_name,
 
         /* Print TCAM manager rule ids for debugging purpose */
         LIST_FOR_EACH_SAFE (entry, next_entry, list_node, ovslist) {
-            
-            xpsTcamMgrTcamIdFromEntryGet(0, 0, entry->rule_id, &tcamId);
+
+            xpsTcamMgrTcamIdFromEntryGet(devId, tableId, entry->rule_id, &tcamId);
             count_pkts = 0;
             count_bytes = 0;
-            
+
             if ((i != num_entries) && entry->counter_en) {
 
                 xpsAcmGetCounterValue(devId, client, tcamId, &count_pkts, &count_bytes);
@@ -1593,7 +1591,7 @@ ops_xp_cls_stats_clear(const struct uuid *list_id, const char *list_name,
 {
     xpAclType_e         acl_type;
     xpAcmClient_e       client;
-    xpsDevice_t         devId;
+    xpsDevice_t         devId = 0;
     struct hmap         *classifier_hmap;
     uint8_t             invalid_iacl_type;
     struct xp_acl_entry *acl_entry;
@@ -1601,6 +1599,7 @@ ops_xp_cls_stats_clear(const struct uuid *list_id, const char *list_name,
     struct xp_acl_rule  *entry, *next_entry;
     uint32_t            tcamId;
     uint64_t            count_pkts, count_bytes;
+    uint32_t            tableId;
 
     VLOG_DBG("%s", __FUNCTION__);
 
@@ -1609,8 +1608,6 @@ ops_xp_cls_stats_clear(const struct uuid *list_id, const char *list_name,
      * interface. we can not support per port per ACE basis as per HW
      * limitation
      */
-
-    devId = 0;
     invalid_iacl_type = 0;
 
     acl_type = ops_xp_cls_get_type(interface_info, direction);
@@ -1619,16 +1616,19 @@ ops_xp_cls_stats_clear(const struct uuid *list_id, const char *list_name,
     case XP_ACL_IACL0:
         classifier_hmap = &classifier_hmap_pacl;
         client = XP_ACM_IPACL_COUNTER;
+        tableId = XP_ACL_IACL0;
         break;
 
     case XP_ACL_IACL1:
         classifier_hmap = &classifier_hmap_bacl;
         client = XP_ACM_IBACL_COUNTER;
+        tableId = XP_ACL_IACL1;
         break;
 
     case XP_ACL_IACL2:
         classifier_hmap = &classifier_hmap_racl;
         client = XP_ACM_IRACL_COUNTER;
+        tableId = XP_ACL_IACL2;
         break;
 
     default:
@@ -1656,7 +1656,7 @@ ops_xp_cls_stats_clear(const struct uuid *list_id, const char *list_name,
         /* Print TCAM manager rule ids for debugging purpose */
         LIST_FOR_EACH_SAFE (entry, next_entry, list_node, ovslist) {
 
-            xpsTcamMgrTcamIdFromEntryGet(0, 0, entry->rule_id, &tcamId);
+            xpsTcamMgrTcamIdFromEntryGet(devId, tableId, entry->rule_id, &tcamId);
             count_pkts = 0;
             count_bytes = 0;
 
@@ -1681,7 +1681,106 @@ ops_xp_cls_stats_clear(const struct uuid *list_id, const char *list_name,
 int
 ops_xp_cls_stats_clear_all(struct ops_cls_pd_list_status *status)
 {
+    xpAclType_e         acl_type;
+    xpAcmClient_e       client;
+    xpsDevice_t         devId = 0;
+    struct hmap         *classifier_hmap;
+    uint8_t             invalid_iacl_type;
+    struct xp_acl_entry *acl_entry;
+    struct ovs_list     *ovslist;
+    struct xp_acl_rule  *entry, *next_entry;
+    uint32_t            tcamId;
+    uint64_t            count_pkts, count_bytes;
+    uint32_t            tableId;
+
     VLOG_DBG("%s", __FUNCTION__);
+
+    /*clear PACL entries*/
+    tableId = XP_ACL_IACL0;
+    client = XP_ACM_IPACL_COUNTER;
+
+    HMAP_FOR_EACH(acl_entry, hnode, &classifier_hmap_pacl) {
+        int i = 0;
+        ovslist = &acl_entry->rule_list;
+
+        LIST_FOR_EACH_SAFE (entry, next_entry, list_node, ovslist) {
+
+            xpsTcamMgrTcamIdFromEntryGet(devId, tableId, entry->rule_id, &tcamId);
+            count_pkts = 0;
+            count_bytes = 0;
+
+            if (entry->counter_en) {
+
+                /* HW counters work on clear on read basis and hence the below call clears the counter value */
+                xpsAcmGetCounterValue(devId, client, tcamId, &count_pkts, &count_bytes);
+                entry->count = 0;
+
+                VLOG_DBG("count for UUID: %d, ACLID %d, rule entry %d, tcam manger rule id :%d, HWTCAM id :%d, HWTABLE id: %d  is %d",
+                         acl_entry->list_uid, acl_entry->acl_id, i, entry->rule_id, tcamId, tableId, entry->count);
+            }
+
+            i++;
+        }
+
+    }
+
+    /*clear BACL entries*/
+    tableId = XP_ACL_IACL1;
+    client = XP_ACM_IBACL_COUNTER;
+
+    HMAP_FOR_EACH(acl_entry, hnode, &classifier_hmap_bacl) {
+        int i = 0;
+        ovslist = &acl_entry->rule_list;
+
+        LIST_FOR_EACH_SAFE (entry, next_entry, list_node, ovslist) {
+
+            xpsTcamMgrTcamIdFromEntryGet(devId, tableId, entry->rule_id, &tcamId);
+            count_pkts = 0;
+            count_bytes = 0;
+
+            if (entry->counter_en) {
+
+                /* HW counters work on clear on read basis and hence the below call clears the counter value */
+                xpsAcmGetCounterValue(devId, client, tcamId, &count_pkts, &count_bytes);
+                entry->count = 0;
+
+                VLOG_DBG("count for UUID: %d, ACLID %d, rule entry %d, tcam manger rule id :%d, HWTCAM id :%d, HWTABLE id: %d  is %d",
+                         acl_entry->list_uid, acl_entry->acl_id, i, entry->rule_id, tcamId, tableId, entry->count);
+            }
+
+            i++;
+        }
+
+    }
+
+    /*clear RACL entries*/
+    tableId = XP_ACL_IACL2;
+    client = XP_ACM_IRACL_COUNTER;
+
+    HMAP_FOR_EACH(acl_entry, hnode, &classifier_hmap_racl) {
+        int i = 0;
+        ovslist = &acl_entry->rule_list;
+
+        LIST_FOR_EACH_SAFE (entry, next_entry, list_node, ovslist) {
+
+            xpsTcamMgrTcamIdFromEntryGet(devId, tableId, entry->rule_id, &tcamId);
+            count_pkts = 0;
+            count_bytes = 0;
+
+            if (entry->counter_en) {
+
+                /* HW counters work on clear on read basis and hence the below call clears the counter value */
+                xpsAcmGetCounterValue(devId, client, tcamId, &count_pkts, &count_bytes);
+                entry->count = 0;
+
+                VLOG_DBG("count for UUID: %d, ACLID %d, rule entry %d, tcam manger rule id :%d, HWTCAM id :%d, HWTABLE id: %d  is %d",
+                         acl_entry->list_uid, acl_entry->acl_id, i, entry->rule_id, tcamId, tableId, entry->count);
+            }
+
+            i++;
+        }
+
+    }
 
     return 0;
 }

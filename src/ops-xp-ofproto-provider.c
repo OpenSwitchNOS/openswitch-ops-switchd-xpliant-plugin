@@ -145,15 +145,9 @@ ofport_xpliant_cast(const struct ofport *ofport)
 static void
 ofproto_xpliant_init(const struct shash *iface_hints OVS_UNUSED)
 {
-    VLOG_INFO("%s", __FUNCTION__);
+    VLOG_DBG("%s", __FUNCTION__);
 
-    /* NOTE: We may assume that OpenFlow Datapath has not been configured yet,
-     * since XDK is state-less by its nature and cannot retain
-     * OpenFlow Datapath configuration between 'ofproto' restarts.
-     * So, we ignore startup configuration provided through 'iface_hints' */
-
-    /* Perform XDK initialization and start IPC server */
-    ops_xp_dev_srv_init();
+    ofproto_xpliant_unixctl_init();
 }
 
 static void
@@ -267,25 +261,14 @@ ofproto_xpliant_construct(struct ofproto *ofproto_)
               ofproto->up.type);
 
     /* Initialize XP device. */
-    for (;;) {
-        ofproto->xpdev = ops_xp_dev_by_id(dev_id);
-        if (ofproto->xpdev) {
-            if(!ops_xp_dev_is_initialized(ofproto->xpdev)) {
-                ops_xp_dev_init(ofproto->xpdev);
-            }
-            break;
-        }
-        ops_xp_msleep(100);
+    ofproto->xpdev = ops_xp_dev_by_id(dev_id);
+    if (!ofproto->xpdev) {
+        VLOG_ERR("Unable to get xpdev with ID %u", dev_id);
+        return EPERM;
     }
-
-    memset(ofproto->sys_mac.ea, 0, ETH_ADDR_LEN);
 
     /* Initialize VRF instance */
     if (STR_EQ(ofproto_->type, "vrf")) {
-        ofproto->bond_mgr = NULL;
-        ofproto->vlan_mgr = ofproto->xpdev->vlan_mgr;
-        ofproto->ml = ofproto->xpdev->ml;
-        ofproto->has_bonded_bundles = false;
         ofproto->vrf = true;
         ofproto->vrf_id = XP_VRF_DEFAULT_ID;
         ofproto->l3_mgr = ops_xp_l3_mgr_create(ofproto->xpdev->id);
@@ -294,30 +277,15 @@ ofproto_xpliant_construct(struct ofproto *ofproto_)
              return EPERM;
         }
         /* Set default ECMP hash values */
-        ops_xp_routing_ecmp_hash_set(ofproto, ofproto->l3_mgr->ecmp_hash, 1);
-
-        hmap_init(&ofproto->bundles);
-        hmap_insert(&all_ofproto_xpliant, &ofproto->all_ofproto_xpliant_node,
-                    hash_string(ofproto->up.name, 0));
-        sset_init(&ofproto->ports);
-        sset_init(&ofproto->ghost_ports);
-        ofproto->change_seq = 0;
-
-        /* Initialize OpenFlow Datapath's ports */
-        ovs_rwlock_init(&ofproto->dp_port_rwlock);
-        hmap_init(&ofproto->dp_ports);
-        ofproto->dp_port_seq = seq_create();
-
-        ofproto_init_tables(ofproto_, N_TABLES);
-        ofproto->up.tables[TBL_INTERNAL].flags = OFTABLE_HIDDEN | OFTABLE_READONLY;
-
-        return 0;
+        ops_xp_routing_ecmp_hash_set(ofproto, ofproto->l3_mgr->ecmp_hash, true);
+    } else {
+        /* Initialize 'system' ofproto */
+        ofproto->vrf = false;
+        ofproto->vrf_id = XP_VRF_DEFAULT_ID;
+        ofproto->l3_mgr = NULL;
     }
 
-    /* Initialize 'system' ofproto */
-    ofproto->vrf = false;
-    ofproto->vrf_id = XP_VRF_DEFAULT_ID;
-    ofproto->l3_mgr = NULL;
+    /* Initialize OpenFlow Datapath's ports */
     ofproto->vlan_mgr = ofproto->xpdev->vlan_mgr;
     ofproto->ml = ofproto->xpdev->ml;
 
@@ -337,8 +305,6 @@ ofproto_xpliant_construct(struct ofproto *ofproto_)
 
     ofproto_init_tables(ofproto_, N_TABLES);
     ofproto->up.tables[TBL_INTERNAL].flags = OFTABLE_HIDDEN | OFTABLE_READONLY;
-
-    ofproto_xpliant_unixctl_init();
 
     return 0;
 }
@@ -1456,7 +1422,8 @@ bundle_update_single_slave_config(struct ofproto_xpliant *ofproto,
     port = CONTAINER_OF(list_front(&bundle->ports),
                         struct ofport_xpliant, bundle_node);
 
-    if (!STR_EQ(bundle->name, netdev_get_name(port->up.netdev))) {
+    if (!STR_EQ(bundle->name, netdev_get_name(port->up.netdev)) ||
+         STR_EQ(bundle->name, DEFAULT_BRIDGE_NAME)) {
         /* This is something different then a physical port or a tunnel.
          * Nothing to do more here. */
         return 0;
@@ -1864,9 +1831,7 @@ bundle_update_l3_config(struct ofproto_xpliant *ofproto,
     }
 
     /* Check for ip changes */
-    if (bundle->l3_intf) {
-        port_ip_reconfigure(ofproto, bundle, s);
-    }
+    port_ip_reconfigure(ofproto, bundle, s);
 }
 
 static void
@@ -2087,6 +2052,22 @@ ofproto_xpliant_bundle_remove(struct ofport *port_)
 }
 
 static int
+ofproto_xpliant_bundle_get(struct ofproto *ofproto_, void *aux, int *bundle_handle)
+{
+    struct ofproto_xpliant *ofproto = ops_xp_ofproto_cast(ofproto_);
+    struct bundle_xpliant *bundle;
+
+    bundle = bundle_lookup(ofproto, aux);
+    if (bundle) {
+        *bundle_handle = bundle->intfId;
+    } else {
+        *bundle_handle = -1;
+    }
+
+    return 0;
+}
+
+static int
 ofproto_xpliant_set_vlan(struct ofproto *ofproto_, int vid, bool add)
 {
     struct ofproto_xpliant *ofproto = ops_xp_ofproto_cast(ofproto_);
@@ -2144,9 +2125,6 @@ ofproto_xpliant_set_vlan(struct ofproto *ofproto_, int vid, bool add)
                 }
             }
         }
-
-        ops_xp_mac_learning_on_vlan_removed(ofproto->vlan_mgr->xp_dev->ml, 
-                                            (xpsVlan_t)vid);
     }
 
     return 0;
@@ -2429,7 +2407,7 @@ const struct ofproto_class ofproto_xpliant_class = {
     NULL,                       /* set_queues */
     ofproto_xpliant_bundle_set,
     ofproto_xpliant_bundle_remove,
-    NULL,                       /* bundle_get */
+    ofproto_xpliant_bundle_get,
     ofproto_xpliant_set_vlan,
     ofproto_xpliant_mirror_set,
     ofproto_xpliant_mirror_get_stats,
@@ -2469,7 +2447,6 @@ const struct ofproto_class ofproto_xpliant_class = {
     ofproto_xpliant_l3_ecmp_hash_set,
 };
 
-
 struct ofproto_xpliant *
 ops_xp_ofproto_lookup(const char *name)
 {
@@ -2483,6 +2460,33 @@ ops_xp_ofproto_lookup(const char *name)
             return ofproto;
         }
     }
+    return NULL;
+}
+
+struct ofproto_xpliant *
+ops_xp_ofproto_get_first(void)
+{
+    struct hmap_node *node = hmap_first(&all_ofproto_xpliant);
+    if (node) {
+        return CONTAINER_OF(node, struct ofproto_xpliant,
+                            all_ofproto_xpliant_node);
+    }
+
+    return NULL;
+}
+
+struct ofproto_xpliant *
+ops_xp_ofproto_get_next(struct ofproto_xpliant *ofproto)
+{
+    if (ofproto) {
+        struct hmap_node *node = hmap_next(&all_ofproto_xpliant,
+                                           &ofproto->all_ofproto_xpliant_node);
+        if (node) {
+            return CONTAINER_OF(node, struct ofproto_xpliant,
+                                all_ofproto_xpliant_node);
+        }
+    }
+
     return NULL;
 }
 

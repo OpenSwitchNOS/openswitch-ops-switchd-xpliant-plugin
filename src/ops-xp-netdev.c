@@ -279,7 +279,7 @@ netdev_xpliant_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
             goto error;
         }
 
-        netdev->port_num = (hw_id) ? (atoi(hw_id) - 1) : XP_MAX_TOTAL_PORTS;
+        netdev->port_num = (hw_id) ? atoi(hw_id) : XP_MAX_TOTAL_PORTS;
         if (netdev->port_num >= XP_MAX_TOTAL_PORTS) {
             VLOG_ERR("Invalid switch port id %s", hw_id);
             goto error;
@@ -360,17 +360,6 @@ netdev_xpliant_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
                     goto error;
                 }
             }
-        }
-
-        /* Add the port to the default VLAN. This will allow it to trap LACP
-         * frames in case it becomes member of a dynamic LAG.*/
-        rc = ops_xp_vlan_member_add(netdev->xpdev->vlan_mgr,
-                                    XP_DEFAULT_VLAN_ID, netdev->ifId,
-                                    XP_L2_ENCAP_DOT1Q_UNTAGGED, 0);
-        if (rc != XP_NO_ERR) {
-            VLOG_ERR("%s: could not add interface: %u to default vlan: %d"
-                     "Err=%d", __FUNCTION__, netdev->ifId,
-                     XP_DEFAULT_VLAN_ID, rc);
         }
 
         rc = ops_xp_host_if_create(netdev->xpdev, (char *)netdev_get_name(&(netdev->up)),
@@ -819,9 +808,6 @@ ops_xp_netdev_link_state_callback(struct netdev_xpliant *netdev,
 
     if (link_status) {
         netdev->link_resets++;
-    } else {
-        /* Notify ML that port is down */
-        ops_xp_mac_learning_on_port_down(netdev->xpdev->ml, netdev->ifId);
     }
 
     netdev_change_seq_changed(&(netdev->up));
@@ -1301,6 +1287,7 @@ netdev_xpliant_internal_set_hw_intf_info(struct netdev *netdev_,
                                          const struct smap *args)
 {
     struct netdev_xpliant *netdev = netdev_xpliant_cast(netdev_);
+    XP_STATUS status;
     int rc = 0;
     struct ether_addr *ether_mac = NULL;
     bool is_bridge_interface = smap_get_bool(args, INTERFACE_HW_INTF_INFO_MAP_BRIDGE, DFLT_INTERFACE_HW_INTF_INFO_MAP_BRIDGE);
@@ -1322,24 +1309,22 @@ netdev_xpliant_internal_set_hw_intf_info(struct netdev *netdev_,
             }
 
             netdev->port_num = CPU_PORT;
-			
-		    netdev->tap_fd = ops_xp_tun_alloc((char *)netdev_get_name(netdev_), (IFF_TAP | IFF_NO_PI));
-            if (netdev->tap_fd <= 0) {
-                VLOG_ERR("Unable to create %s device.", netdev_get_name(netdev_));
+
+            status = xpsPortGetCPUPortIntfId(dev_num, &netdev->ifId);
+            if (status != XP_NO_ERR) {
+                VLOG_ERR("%s, Unable to get interface ID for CPU port",
+                         __FUNCTION__);
                 goto error;
             }
 
-            rc = set_nonblocking(netdev->tap_fd);
+            rc = ops_xp_host_if_create(netdev->xpdev, (char *)netdev_get_name(&(netdev->up)),
+                                       netdev->ifId, ether_mac, &netdev->xpnet_if_id);
+
             if (rc) {
-                VLOG_ERR("Unable to set %s device into nonblocking mode.", netdev_get_name(netdev_));
-                close(netdev->tap_fd);
+                VLOG_ERR("Failed to initialize interface %s", netdev_get_name(&(netdev->up)));
                 goto error;
-            }
-
-            if (0 != ops_xp_net_if_setup((char *)netdev_get_name(netdev_), ether_mac)) {
-                VLOG_ERR("Unable to setup %s interface.", netdev_get_name(netdev_));
-                close(netdev->tap_fd);
-                goto error;
+            } else {
+                handle_xp_host_port_filters(netdev, true);
             }
         }
 
