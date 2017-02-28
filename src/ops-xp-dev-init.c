@@ -51,7 +51,7 @@ VLOG_DEFINE_THIS_MODULE(xp_dev_init);
 const char **moduleNames = NULL;
 
 static xpsDevConfigStruct_t defaultConfig = {
-    XP_ROUTE_CENTRIC_SINGLE_PIPE_PROFILE,     // SELECT PROFILE
+    XP_DEFAULT_TWO_PIPE_PROFILE,              // SELECT PROFILE
     SKU_128X10,                               // default speed
 #ifdef OPS_XP_SIM
     XPS_DAL_WHITEMODEL,
@@ -65,7 +65,7 @@ static xpsDevConfigStruct_t defaultConfig = {
 int
 ops_xp_sdk_init(xpInitType_t initType)
 {
-    int status = XP_NO_ERR;
+    XP_STATUS status = XP_NO_ERR;
 
     moduleNames = xpsSdkLoggerInit();
     if (moduleNames == NULL) {
@@ -168,8 +168,6 @@ ops_xp_dev_config(xpsDevice_t deviceId, void *arg)
     }
     VLOG_INFO("XP device instance allocated!\n");
 
-    /*acl related init*/
-    ops_xp_cls_init(deviceId);
     return status;
 }
 

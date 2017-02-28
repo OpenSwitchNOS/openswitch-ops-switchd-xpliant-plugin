@@ -36,9 +36,11 @@ typedef struct {
     struct ovs_list dummy_host_list;    /* Contains dummy/empty host entries */
 
     struct hmap route_map;
-    struct hmap nh_group_map;   /* All NextHop ECMP groups */
-    struct hmap host_map;       /* Hosts by HW hash */
-    struct hmap host_id_map;    /* Hosts by ID value */
+    struct hmap nh_group_map;         /* All NextHop ECMP groups */
+    struct hmap host_map;             /* Hosts by HW hash */
+    struct hmap host_id_map;          /* Hosts by ID value */
+    struct hmap host_vlan_mac_map;    /* Hosts by VLAN and MAC value */
+    struct hmap nh_vlan_mac_map;      /* Next Hops by VLAN and MAC value */
 
     uint32_t ecmp_hash;
 
@@ -69,6 +71,8 @@ typedef struct {
 typedef struct {
     struct hmap_node hmap_node;     /* Node in a xp_l3_mgr's host_map. */
     struct hmap_node hmap_id_node;  /* Node in a xp_l3_mgr's host_id_map. */
+    struct hmap_node hmap_vlan_mac_node; /* Node in a xp_l3_mgr's
+                                          * host_vlan_mac_map. */
     struct ovs_list list_node;      /* Node in a xp_l3_mgr's dummy_host_list. */
     bool is_ipv6_addr;
     struct in_addr ipv4_dest_addr;
@@ -82,6 +86,8 @@ typedef struct {
  * Guarded by owning xp_l3_mgr's mutex */
 typedef struct {
     struct hmap_node hmap_node; /* Node in nh_map of NH group. */
+    struct hmap_node hmap_vlan_mac_node; /* Node in a xp_l3_mgr's
+                                          * nh_vlan_mac_map. */
     xpsL3NextHopEntry_t xp_nh;  /* NH entry in HW */
     uint32_t xp_nh_id;          /* NH ID in the HW */
     char *id;                   /* NH ID in OPS */
@@ -103,6 +109,7 @@ typedef struct net_address {
 
 struct ofproto_xpliant;
 
+int ops_xp_l3_init(xpsDevice_t devId);
 
 xp_l3_mgr_t *ops_xp_l3_mgr_create(xpsDevice_t devId);
 xp_l3_mgr_t *ops_xp_l3_mgr_ref(xp_l3_mgr_t *mgr);
@@ -112,7 +119,7 @@ void ops_xp_l3_mgr_destroy(struct ofproto_xpliant *ofproto);
 int ops_xp_routing_add_host_entry(struct ofproto_xpliant *ofproto,
                                   xpsInterfaceId_t port_intf_id,
                                   bool is_ipv6_addr,char *ip_addr,
-                                  char *next_hop_mac_addr,
+                                  const char *next_hop_mac_addr,
                                   xpsInterfaceId_t l3_intf_id,
                                   xpsVlan_t vid, bool local, int *l3_egress_id);
 
@@ -146,6 +153,9 @@ void ops_xp_routing_disable_l3_interface(struct ofproto_xpliant *ofproto,
 
 void ops_xp_routing_update_l3_interface(struct ofproto_xpliant *ofproto,
                                         xp_l3_intf_t *l3_intf);
+
+void ops_xp_routing_on_mac_resolved(struct xpliant_dev *xp_dev, xpsVlan_t vid,
+                                    macAddr_t mac, xpsInterfaceId_t if_id);
 
 void ops_xp_routing_unixctl_init(void);
 

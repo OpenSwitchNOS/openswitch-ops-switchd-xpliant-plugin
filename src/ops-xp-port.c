@@ -362,9 +362,6 @@ ops_xp_port_set_config(struct netdev_xpliant *netdev,
 
             netdev->link_status = false;
 
-            /* Notify ML that port is down */
-            ops_xp_mac_learning_on_port_down(netdev->xpdev->ml, netdev->ifId);
-
         } else {
 
             link_netdev(netdev);

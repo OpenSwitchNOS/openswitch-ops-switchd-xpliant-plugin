@@ -108,15 +108,22 @@
 #define XP_ETH_ADDR_ARGS(mac) \
         (mac)[5], (mac)[4], (mac)[3], (mac)[2], (mac)[1], (mac)[0]
 
+#define XP_IP_FMT IP_FMT
+#define XP_IP_ARGS(ip) \
+        ((ip) >> 24) & 0xff, \
+        ((ip) >> 16) & 0xff, \
+        ((ip) >> 8) & 0xff, \
+        (ip) & 0xff
+
 struct arp_hdr {
-    ovs_be16 hw_type;               /* Hardware type */ 
-    ovs_be16 pr_type;               /* Protocol type */ 
-    uint8_t  hw_size;               /* Hardware size */ 
-    uint8_t  pr_size;               /* Protocol size */ 
-    ovs_be16 op_code;               /* Opcode */ 
-    uint8_t  s_mac[ETH_ADDR_LEN];   /* Sender MAC address */ 
-    ovs_be32 s_ip;                  /* Sender IP address  */ 
-    uint8_t  t_mac[ETH_ADDR_LEN];   /* Target MAC address */ 
+    ovs_be16 hw_type;               /* Hardware type */
+    ovs_be16 pr_type;               /* Protocol type */
+    uint8_t  hw_size;               /* Hardware size */
+    uint8_t  pr_size;               /* Protocol size */
+    ovs_be16 op_code;               /* Opcode */
+    uint8_t  s_mac[ETH_ADDR_LEN];   /* Sender MAC address */
+    ovs_be32 s_ip;                  /* Sender IP address  */
+    uint8_t  t_mac[ETH_ADDR_LEN];   /* Target MAC address */
     ovs_be32 t_ip;                  /* Target IP address  */
 }__attribute__((packed));
 

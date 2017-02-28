@@ -54,6 +54,7 @@ ops_xp_vlan_mgr_create(struct xpliant_dev *xp_dev)
 
     for (i = XP_VLAN_MIN_ID; i <= XP_VLAN_MAX_ID; i++) {
         mgr->table[i].is_existing = false;
+        mgr->table[i].l3_if = XPS_INTF_INVALID_ID;
         hmap_init(&mgr->table[i].members_table);
         hmap_init(&mgr->table[i].vxlan_vnis);
         hmap_init(&mgr->table[i].geneve_vnis);
@@ -167,6 +168,7 @@ ops_xp_vlan_remove(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id)
         return 0;
     }
 
+    mgr->table[vlan_id].l3_if = XPS_INTF_INVALID_ID;
     mgr->table[vlan_id].is_existing = false;
 
     /* Clear members_table */
@@ -216,9 +218,35 @@ ops_xp_vlan_remove(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id)
     return 0;
 }
 
+/* Sets L3 interface ID for a VLAN. */
+int
+ops_xp_vlan_set_l3_if_id(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id,
+                         xpsInterfaceId_t l3_if_id)
+{
+
+    if (!ops_xp_vlan_is_existing(mgr, vlan_id)) {
+        return EPERM;
+    }
+
+    mgr->table[vlan_id].l3_if = l3_if_id;
+
+    return 0;
+}
+
+/* Returns L3 interface ID for a VLAN. */
+xpsInterfaceId_t
+ops_xp_vlan_get_l3_if_id(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id)
+{
+    if (ops_xp_vlan_is_existing(mgr, vlan_id)) {
+        return mgr->table[vlan_id].l3_if;
+    }
+
+    return XPS_INTF_INVALID_ID;
+}
+
 /* Enables/disables flooding on a VLAN.
  * Updates corresponding flag and sets SA learning command
- * to flooding(if flooding flag is true) in the hardware 
+ * to flooding (if flooding flag is true) in the hardware
  * i.e. learning packets won't be trapped to CPU for this VLAN. */
 int
 ops_xp_vlan_enable_flooding(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id,

@@ -55,6 +55,9 @@ VLOG_DEFINE_THIS_MODULE(xp_mac_learning);
 /* MAC idle timer tick in seconds. */
 #define XP_ML_MLEARN_IDLE_TICK_TIME 1
 
+/* FDB rehashing level */
+#define XP_ML_FDB_REHASH_LEVEL      4
+
 /*struct xp_mac_learning* g_xp_ml = NULL;*/
 static struct vlog_rate_limit ml_rl = VLOG_RATE_LIMIT_INIT(5, 20);
 
@@ -63,8 +66,7 @@ static void *mac_learning_events_handler(void *arg);
 #endif /* OPS_XP_ML_EVENT_PROCESSING */
 static void ops_xp_mac_learning_mlearn_action_add(struct xp_mac_learning *ml,
                                                   xpsFdbEntry_t *xps_fdb_entry,
-                                                  uint32_t index,
-                                                  uint32_t reHashIndex,
+                                                  xpsHashIndexList_t *hash_list,
                                                   const mac_event event);
 static void ops_xp_mac_learning_process_mlearn(struct xp_mac_learning *ml);
 
@@ -109,6 +111,30 @@ calc_aging_params(unsigned int idle_time, uint32_t *unit_time,
               __FUNCTION__, idle_time, *unit_time, *age_expo);
 }
 
+static struct mac_learning_plugin_interface *
+get_plugin_mac_learning_interface (struct xp_mac_learning *ml)
+{
+    struct plugin_extension_interface *extension = NULL;
+
+    ovs_assert(ml);
+
+    if (ml->plugin_interface) {
+        return (ml->plugin_interface);
+    }
+
+    if (!find_plugin_extension(MAC_LEARNING_PLUGIN_INTERFACE_NAME,
+                               MAC_LEARNING_PLUGIN_INTERFACE_MAJOR,
+                               MAC_LEARNING_PLUGIN_INTERFACE_MINOR,
+                               &extension)) {
+        if (extension) {
+            ml->plugin_interface = extension->plugin_interface;
+            return (extension->plugin_interface);
+        }
+    }
+
+    return NULL;
+}
+
 /* Creates and returns a new MAC learning table with an initial MAC aging
  * timeout of 'idle_time' seconds and an initial maximum of XP_MAC_DEFAULT_MAX
  * entries. */
@@ -119,7 +145,6 @@ ops_xp_mac_learning_create(struct xpliant_dev *xpdev, unsigned int idle_time)
     XP_STATUS status = XP_NO_ERR;
     int idx = 0;
     uint32_t unit_time, age_expo;
-    struct plugin_extension_interface *extension = NULL;
 
     ovs_assert(xpdev);
 
@@ -146,15 +171,6 @@ ops_xp_mac_learning_create(struct xpliant_dev *xpdev, unsigned int idle_time)
         hmap_reserve(&(ml->mlearn_event_tables[idx].table), BUFFER_SIZE);
     }
 
-    if (find_plugin_extension(MAC_LEARNING_PLUGIN_INTERFACE_NAME,
-                              MAC_LEARNING_PLUGIN_INTERFACE_MAJOR,
-                              MAC_LEARNING_PLUGIN_INTERFACE_MINOR,
-                              &extension) == 0) {
-        if (extension) {
-            ml->plugin_interface = extension->plugin_interface;
-        }
-    }
-
     timer_set_duration(&ml->mlearn_timer, XP_ML_MLEARN_TIMER_TIMEOUT * 1000);
 
 #ifdef OPS_XP_ML_EVENT_PROCESSING
@@ -172,6 +188,11 @@ ops_xp_mac_learning_create(struct xpliant_dev *xpdev, unsigned int idle_time)
          * shouldn't cause crash of OVS */
         ovs_abort(0, "xp_mac_learning_create failed due to inability"
                      "of fdb learning handler registration");
+    }
+
+    status = xpsFdbSetRehashLevel(ml->xpdev->id, XP_ML_FDB_REHASH_LEVEL);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to configure FDB rehash level. Status: %d", status);
     }
 
     /* Calculate aging configuration values */
@@ -329,8 +350,8 @@ int
 ops_xp_mac_learning_insert(struct xp_mac_learning *ml, struct xp_mac_entry *e)
 {
     XP_STATUS status = XP_NO_ERR;
-    uint32_t index = 0;
-    uint32_t reHashIndex = 0;
+    xpsHashIndexList_t hash_list = { 0, { UINT32_MAX, } };
+    uint32_t i;
 
     ovs_assert(ml);
     ovs_assert(e);
@@ -345,7 +366,7 @@ ops_xp_mac_learning_insert(struct xp_mac_learning *ml, struct xp_mac_entry *e)
         return EPERM;
     }
 
-    status = xpsFdbAddEntry(ml->xpdev->id, &e->xps_fdb_entry, &index, &reHashIndex);
+    status = xpsFdbAddEntry(ml->xpdev->id, &e->xps_fdb_entry, &hash_list);
     if (status != XP_NO_ERR)
     {
          VLOG_ERR("%s: Unable to install entry with VLAN: %d, "
@@ -357,51 +378,32 @@ ops_xp_mac_learning_insert(struct xp_mac_learning *ml, struct xp_mac_entry *e)
          return EPERM;
     }
 
-    if (index != reHashIndex) {
-        /*  The new entry in the hardware has been put to a place
-         *  occupied by another one(pointed by index) which has been
-         *  previously relocated to a different place
-         *  and now is pointed by reHashIndex.
-         *  According to this need to make corresponding relocations in
-         *  our FDB table. */
+    if (hash_list.size > 1) {
+        /* The new entry in the hardware has been put to a place
+         * occupied by another one (pointed by index_list.index[0])
+         * which has been relocated to a different place and now is pointed
+         * by index_list.index[1]. The same could happen to other entries
+         * pointed by each index in the list. According to this need to make
+         * corresponding relocations in FDB table cache. */
+        for (i = hash_list.size - 1; i > 0; i--) {
+            struct xp_mac_entry *old_e = \
+                ops_xp_mac_learning_lookup(ml, hash_list.index[i - 1]);
 
-        struct xp_mac_entry *old_e = ops_xp_mac_learning_lookup(ml, index);
-
-        if (old_e) {
-            hmap_remove(&ml->table, &old_e->hmap_node);
-            hmap_insert(&ml->table, &old_e->hmap_node, reHashIndex);
-        } else {
-            VLOG_ERR("%s: Unable to lookup entry for VLAN %d and "
-                      "MAC: " XP_ETH_ADDR_FMT
-                      " with index 0x%x from the software FDB table.\n", 
-                      __FUNCTION__, e->xps_fdb_entry.vlanId,
-                      XP_ETH_ADDR_ARGS(e->xps_fdb_entry.macAddr), index);
-
-            status = xpsFdbRemoveEntry(ml->xpdev->id, &e->xps_fdb_entry);
-            if (status != XP_NO_ERR) {
-                VLOG_ERR("%s: Unable to remove entry for VLAN %d and "
+            if (old_e) {
+                hmap_remove(&ml->table, &old_e->hmap_node);
+                hmap_insert(&ml->table, &old_e->hmap_node, hash_list.index[i]);
+            } else {
+                VLOG_ERR("%s: Unable to lookup entry for VLAN %d and "
                          "MAC: " XP_ETH_ADDR_FMT
-                         " with index 0x%x from the hardware FDB table. "
-                         "Reason: %d\n",
-                         __FUNCTION__,
-                         e->xps_fdb_entry.vlanId,
+                         " with index 0x%x from the software FDB table.\n",
+                         __FUNCTION__, e->xps_fdb_entry.vlanId,
                          XP_ETH_ADDR_ARGS(e->xps_fdb_entry.macAddr),
-                         index, status);
+                         hash_list.index[i - 1]);
             }
-
-            status = xpsFdbRemoveEntryByIndex(ml->xpdev->id, reHashIndex);
-            if (status != XP_NO_ERR) {
-                VLOG_ERR("%s: Unable to remove entry "
-                         "with index 0x%x from the hardware FDB table. "
-                         "Reason: %d\n", __FUNCTION__, index, status);
-            }
-
-            free(e);
-            return ENOENT;
         }
     }
 
-    hmap_insert(&ml->table, &e->hmap_node, index);
+    hmap_insert(&ml->table, &e->hmap_node, hash_list.index[0]);
     VLOG_DBG_RL(&ml_rl, "Inserted new entry into ML table: VLAN %d, "
                         "MAC: " XP_ETH_ADDR_FMT ", Intf ID: %u, index 0x%lx\n",
                 e->xps_fdb_entry.vlanId,
@@ -409,8 +411,13 @@ ops_xp_mac_learning_insert(struct xp_mac_learning *ml, struct xp_mac_entry *e)
                 e->xps_fdb_entry.intfId,
                 e->hmap_node.hash);
 
-    ops_xp_mac_learning_mlearn_action_add(ml, &e->xps_fdb_entry,
-                                          index, reHashIndex, MLEARN_ADD);
+    ops_xp_routing_on_mac_resolved(ml->xpdev,
+                                   e->xps_fdb_entry.vlanId,
+                                   e->xps_fdb_entry.macAddr,
+                                   e->xps_fdb_entry.intfId);
+
+    ops_xp_mac_learning_mlearn_action_add(ml, &e->xps_fdb_entry, &hash_list,
+                                          MLEARN_ADD);
 
     return 0;
 }
@@ -435,15 +442,19 @@ struct xp_mac_entry *
 ops_xp_mac_learning_lookup_by_vlan_and_mac(const struct xp_mac_learning *ml,
                                            xpsVlan_t vlan_id, macAddr_t macAddr)
 {
-    struct xp_mac_entry *e = NULL;
+    XP_STATUS status;
+    xpsFdbEntry_t xps_fdb_entry;
+    uint32_t index;
+
     ovs_assert(ml);
 
-    HMAP_FOR_EACH (e, hmap_node, &ml->table) {
-        if (!memcmp(e->xps_fdb_entry.macAddr, macAddr, ETH_ADDR_LEN) &&
-            (e->xps_fdb_entry.vlanId == vlan_id)) {
+    memcpy(xps_fdb_entry.macAddr, macAddr, ETH_ADDR_LEN);
+    xps_fdb_entry.vlanId = vlan_id;
 
-            return e;
-        }
+    /* Lookup if the VLAN and MAC pair exists */
+    status = xpsFdbFindEntry(ml->xpdev->id, &xps_fdb_entry, &index);
+    if (status == XP_NO_ERR) {
+        return ops_xp_mac_learning_lookup(ml, index);
     }
 
     return NULL;
@@ -454,6 +465,7 @@ int
 ops_xp_mac_learning_expire(struct xp_mac_learning *ml, struct xp_mac_entry *e)
 {
     XP_STATUS status = XP_NO_ERR;
+    xpsHashIndexList_t hash_list;
 
     status = xpsFdbRemoveEntryByIndex(ml->xpdev->id, e->hmap_node.hash);
     if (status != XP_NO_ERR) {
@@ -475,9 +487,11 @@ ops_xp_mac_learning_expire(struct xp_mac_learning *ml, struct xp_mac_entry *e)
                 e->xps_fdb_entry.intfId,
                 e->hmap_node.hash);
 
+    hash_list.size = 1;
+    hash_list.index[0] = e->hmap_node.hash;
+
     ops_xp_mac_learning_mlearn_action_add(ml, &e->xps_fdb_entry,
-                                          e->hmap_node.hash,
-                                          e->hmap_node.hash, MLEARN_DEL);
+                                          &hash_list, MLEARN_DEL);
     free(e);
 
     return 0;
@@ -537,6 +551,7 @@ ops_xp_mac_learning_learn(struct xp_mac_learning *ml,
     switch (data->reasonCode) {
     case XP_BRIDGE_MAC_SA_NEW:
     case XP_BRIDGE_RC_IVIF_SA_MISS:
+    case XP_BRIDGE_MAC_SA_MOVE:
         {
             uint32_t index = 0;
 
@@ -547,7 +562,6 @@ ops_xp_mac_learning_learn(struct xp_mac_learning *ml,
                 struct xp_mac_entry *e = xmalloc(sizeof(*e));
                 memcpy(&e->xps_fdb_entry, &data->xps_fdb_entry,
                        sizeof(e->xps_fdb_entry));
-                e->port.p = NULL;
 
                 return ops_xp_mac_learning_insert(ml, e);
             } else if (status != XP_NO_ERR) {
@@ -560,73 +574,63 @@ ops_xp_mac_learning_learn(struct xp_mac_learning *ml,
                          status);
                 return ENOENT;
             } else {
-                /* Entry already exist */
-                return EEXIST;
-            }
-        }
-        break;
+                /* The entry for VLAN and MAC pair exists. Update with new data */
+                struct xp_mac_entry *upd_e = ops_xp_mac_learning_lookup(ml, index);
+                if (!upd_e) {
+                    VLOG_ERR("%s: Unable to lookup entry for VLAN %d and "
+                             "MAC: " XP_ETH_ADDR_FMT
+                             " with index 0x%x from the software FDB table.\n",
+                             __FUNCTION__,
+                             data->xps_fdb_entry.vlanId,
+                             XP_ETH_ADDR_ARGS(data->xps_fdb_entry.macAddr), index);
 
-    case XP_BRIDGE_MAC_SA_MOVE:
-        {
-            struct xp_mac_entry *upd_e = NULL;
-            uint32_t index = 0;
+                    status = xpsFdbRemoveEntry(ml->xpdev->id, &data->xps_fdb_entry);
+                    if (status != XP_NO_ERR) {
+                         VLOG_ERR("%s: Unable to remove entry for VLAN %d and "
+                                  "MAC: " XP_ETH_ADDR_FMT
+                                  " with index 0x%x from the hardware "
+                                  "FDB table. Reason: %d\n",
+                                  __FUNCTION__,
+                                  data->xps_fdb_entry.vlanId,
+                                  XP_ETH_ADDR_ARGS(data->xps_fdb_entry.macAddr),
+                                  index, status);
+                    }
 
-            /* Lookup the original entry */
-            status = xpsFdbFindEntry(ml->xpdev->id, &data->xps_fdb_entry, &index);
-            if (status != XP_NO_ERR) {
-                VLOG_ERR("%s: Unable to get entry index for VLAN %d, "
-                         "MAC: " XP_ETH_ADDR_FMT
-                         " from the hardware FDB table. Reason: %d\n",
-                         __FUNCTION__, data->xps_fdb_entry.vlanId,
-                         XP_ETH_ADDR_ARGS(data->xps_fdb_entry.macAddr),
-                         status);
-                return ENOENT;
-            }
-
-            /* Update the entry */
-            upd_e = ops_xp_mac_learning_lookup(ml, index);
-
-            if (!upd_e) {
-                VLOG_ERR("%s: Unable to lookup entry for VLAN %d and "
-                         "MAC: " XP_ETH_ADDR_FMT
-                         " with index 0x%x from the software FDB table.\n",
-                         __FUNCTION__,
-                         data->xps_fdb_entry.vlanId,
-                         XP_ETH_ADDR_ARGS(data->xps_fdb_entry.macAddr), index);
-
-                status = xpsFdbRemoveEntry(ml->xpdev->id, &data->xps_fdb_entry);
-                if (status != XP_NO_ERR) {
-                     VLOG_ERR("%s: Unable to remove entry for VLAN %d and "
-                              "MAC: " XP_ETH_ADDR_FMT
-                              " with index 0x%x from the hardware "
-                              "FDB table. Reason: %d\n",
-                              __FUNCTION__,
-                              data->xps_fdb_entry.vlanId,
-                              XP_ETH_ADDR_ARGS(data->xps_fdb_entry.macAddr),
-                              index, status);
+                    return EPERM;
                 }
+                /* MAC SA moved to new port ? */
+                if (upd_e->xps_fdb_entry.intfId != data->xps_fdb_entry.intfId) {
+                    xpsHashIndexList_t hash_list;
 
-                return EPERM;
-            }
+                    upd_e->xps_fdb_entry.intfId = data->xps_fdb_entry.intfId;
 
-            upd_e->xps_fdb_entry.intfId = data->xps_fdb_entry.intfId;
+                    hash_list.size = 1;
+                    hash_list.index[0] = index;
 
-            ops_xp_mac_learning_mlearn_action_add(ml, &upd_e->xps_fdb_entry,
-                                                  index, index, MLEARN_ADD);
+                    ops_xp_mac_learning_mlearn_action_add(ml, &upd_e->xps_fdb_entry,
+                                                          &hash_list, MLEARN_MOVE);
 
-            status = xpsFdbWriteEntry(ml->xpdev->id, index,
-                                      &upd_e->xps_fdb_entry);
-            if (status != XP_NO_ERR) {
-                VLOG_ERR("%s: Unable to update entry for VLAN %d and "
-                         "MAC: " XP_ETH_ADDR_FMT
-                         " with index 0x%x in the hardware FDB table. "
-                         "Reason: %d\n",
-                          __FUNCTION__,
-                         data->xps_fdb_entry.vlanId,
-                         XP_ETH_ADDR_ARGS(data->xps_fdb_entry.macAddr),
-                         index, status);
+                    status = xpsFdbWriteEntry(ml->xpdev->id, index,
+                                              &upd_e->xps_fdb_entry);
+                    if (status != XP_NO_ERR) {
+                        VLOG_ERR("%s: Unable to update entry for VLAN %d and "
+                                 "MAC: " XP_ETH_ADDR_FMT
+                                 " with index 0x%x in the hardware FDB table. "
+                                 "Reason: %d\n",
+                                  __FUNCTION__,
+                                 data->xps_fdb_entry.vlanId,
+                                 XP_ETH_ADDR_ARGS(data->xps_fdb_entry.macAddr),
+                                 index, status);
 
-                ops_xp_mac_learning_expire(ml, upd_e);
+                        ops_xp_mac_learning_expire(ml, upd_e);
+                        return EFAULT;
+                    }
+
+                    ops_xp_routing_on_mac_resolved(ml->xpdev,
+                                                   upd_e->xps_fdb_entry.vlanId,
+                                                   upd_e->xps_fdb_entry.macAddr,
+                                                   upd_e->xps_fdb_entry.intfId);
+                }
             }
         }
         break;
@@ -1161,8 +1165,7 @@ ops_xp_mac_learning_mlearn_entry_fill_data(struct xpliant_dev *xpdev,
 static void
 ops_xp_mac_learning_mlearn_action_add(struct xp_mac_learning *ml,
                                       xpsFdbEntry_t *xps_fdb_entry,
-                                      uint32_t index,
-                                      uint32_t reHashIndex,
+                                      xpsHashIndexList_t *hash_list,
                                       const mac_event event)
     OVS_REQ_WRLOCK(ml->rwlock)
 {
@@ -1170,53 +1173,64 @@ ops_xp_mac_learning_mlearn_action_add(struct xp_mac_learning *ml,
     struct hmap_node *node;
     struct mlearn_hmap *mhmap;
     int actual_size = 0;
+    bool existing_updated = false;
+    uint32_t i;
 
     ovs_assert(ml);
     ovs_assert(xps_fdb_entry);
+    ovs_assert(hash_list);
 
     mhmap = &ml->mlearn_event_tables[ml->curr_mlearn_table_in_use];
     actual_size = mhmap->buffer.actual_size;
 
-    node = hmap_first_with_hash(&mhmap->table, index);
-    if (node) {
-        /* Entry already exists - just fill it with new data. */
-        e = CONTAINER_OF(node, struct mlearn_hmap_node, hmap_node);
-
-        if (index != reHashIndex) {
-            /* Rehasing occured - move an old entry to a new place. */
-            if (actual_size < mhmap->buffer.size) {
-                struct mlearn_hmap_node *new_e =
-                                    &(mhmap->buffer.nodes[actual_size]);
-
-                memcpy(new_e, e, sizeof(*new_e));
-                hmap_insert(&mhmap->table, &(new_e->hmap_node), reHashIndex);
-                mhmap->buffer.actual_size++;
-            }  else {
-                VLOG_ERR("Not able to insert elements in hmap, size is: %u\n",
-                         mhmap->buffer.actual_size);
+    /* Check for the rehashing first */
+    if (hash_list->size > 1) {
+        /* Rehasing occurred - move an old entries to a new place. */
+        for (i = hash_list->size - 1; i > 0; i--) {
+            /* Check if rehashed entry is present in the table */
+            node = hmap_first_with_hash(&mhmap->table, hash_list->index[i - 1]);
+            if (node) {
+                /* Move node by assigning actual hash value */
+                hmap_remove(&mhmap->table, node);
+                hmap_insert(&mhmap->table, node, hash_list->index[i]);
             }
         }
-
-        ops_xp_mac_learning_mlearn_entry_fill_data(ml->xpdev, e,
-                                                   xps_fdb_entry, event);
     } else {
+        /* Check if entry already exists */
+        node = hmap_first_with_hash(&mhmap->table, hash_list->index[0]);
+        if (node) {
+            /* Update of an existing notification */
+            existing_updated = true;
+            /* Operation is DEL ? */
+            if (event == MLEARN_DEL) {
+                /* Remove the node from the hmap table to suppress notification */
+                hmap_remove(&mhmap->table, node);
+            } else {
+                e = CONTAINER_OF(node, struct mlearn_hmap_node, hmap_node);
+                /* Operation is MOVE or ADD ? Just fill entry with new data */
+                ops_xp_mac_learning_mlearn_entry_fill_data(ml->xpdev, e,
+                                                           xps_fdb_entry, event);
+            }
+        }
+    }
 
+    if (!existing_updated) {
         /* Entry doesn't exist - add a new one. */
         if (actual_size < mhmap->buffer.size) {
             e = &(mhmap->buffer.nodes[actual_size]);
             ops_xp_mac_learning_mlearn_entry_fill_data(ml->xpdev, e,
                                                        xps_fdb_entry, event);
-            hmap_insert(&mhmap->table, &(e->hmap_node), index);
+            hmap_insert(&mhmap->table, &(e->hmap_node), hash_list->index[0]);
             mhmap->buffer.actual_size++;
         } else {
             VLOG_ERR("Not able to insert elements in hmap, size is: %u\n",
                       mhmap->buffer.actual_size);
         }
-    }
 
-    /* Notify vswitchd */
-    if (ops_xp_mac_learning_mlearn_table_is_full(mhmap)) {
-        ops_xp_mac_learning_process_mlearn(ml);
+        /* Notify vswitchd */
+        if (ops_xp_mac_learning_mlearn_table_is_full(mhmap)) {
+            ops_xp_mac_learning_process_mlearn(ml);
+        }
     }
 }
 
@@ -1238,15 +1252,20 @@ static void
 ops_xp_mac_learning_process_mlearn(struct xp_mac_learning *ml)
     OVS_REQ_WRLOCK(ml->rwlock)
 {
-    if (ml && ml->plugin_interface) {
-        if (hmap_count(&(ml->mlearn_event_tables[ml->curr_mlearn_table_in_use].table))) {
-            ml->plugin_interface->mac_learning_trigger_callback();
-            ml->curr_mlearn_table_in_use = ml->curr_mlearn_table_in_use ^ 1;
-            ops_xp_mac_learning_clear_mlearn_hmap(&ml->mlearn_event_tables[ml->curr_mlearn_table_in_use]);
+    struct mac_learning_plugin_interface *p_mlearn_interface = NULL;
+
+    if (ml) {
+        p_mlearn_interface = get_plugin_mac_learning_interface(ml);
+        if (p_mlearn_interface) {
+            if (hmap_count(&(ml->mlearn_event_tables[ml->curr_mlearn_table_in_use].table))) {
+                p_mlearn_interface->mac_learning_trigger_callback();
+                ml->curr_mlearn_table_in_use = ml->curr_mlearn_table_in_use ^ 1;
+                ops_xp_mac_learning_clear_mlearn_hmap(&ml->mlearn_event_tables[ml->curr_mlearn_table_in_use]);
+            }
+        } else {
+            VLOG_ERR("%s: Unable to find mac learning plugin interface",
+                     __FUNCTION__);
         }
-    } else {
-        VLOG_ERR("%s: Unable to find mac learning plugin interface",
-                 __FUNCTION__);
     }
 }
 
@@ -1285,4 +1304,71 @@ ops_xp_mac_learning_hmap_get(struct mlearn_hmap **mhmap)
     ops_xp_dev_free(xp_dev);
 
     return 0;
+}
+
+int
+ops_xp_l2_addr_flush_handler(mac_flush_params_t *settings)
+{
+    int rc = 0;
+    struct xpliant_dev *xp_dev = ops_xp_dev_by_id(0);
+    struct xp_mac_learning *ml = xp_dev->ml;
+    struct netdev_xpliant *netdev;
+    xpsInterfaceId_t inftId = XPS_INTF_INVALID_ID;
+
+    VLOG_DBG("%s: on port_name %s, vlan %d, tgid %d",
+             __FUNCTION__, settings->port_name, settings->vlan, settings->tgid);
+
+    /* Get Harware Port */
+    if ((settings->options == L2MAC_FLUSH_BY_PORT)
+        || (settings->options == L2MAC_FLUSH_BY_PORT_VLAN)) {
+        netdev = ops_xp_netdev_from_name(settings->port_name);
+        if (!netdev) {
+            VLOG_INFO("%s: Could not get netdev for port: %s",
+                      __FUNCTION__, settings->port_name);
+            ops_xp_dev_free(xp_dev);
+            return -1;
+        }
+        inftId = netdev->ifId;
+        netdev_close(&netdev->up);
+    } else if ((settings->options == L2MAC_FLUSH_BY_TRUNK)
+               || (settings->options == L2MAC_FLUSH_BY_TRUNK_VLAN)) {
+        inftId = (xpsInterfaceId_t)settings->tgid;
+    }
+
+    switch (settings->options) {
+    case L2MAC_FLUSH_BY_VLAN:
+        rc = ops_xp_mac_learning_flush_vlan(ml, (xpsVlan_t)settings->vlan /* ,flags */);
+        if (rc) {
+            VLOG_ERR_RL(&ml_rl, "%s: vlan %d flags %u rc %d opt %d",
+                        __FUNCTION__, settings->vlan,
+                        settings->flags, rc, settings->options);
+        }
+        break;
+    case L2MAC_FLUSH_BY_PORT:
+    case L2MAC_FLUSH_BY_TRUNK: /* LAG */
+        rc = ops_xp_mac_learning_flush_intfId(ml, inftId, true /* flags */);
+        if (rc) {
+            VLOG_ERR_RL(&ml_rl, "%s: interface: %u name %s flags %u rc %d opt %d",
+                        __FUNCTION__, inftId, settings->port_name,
+                        settings->flags, rc, settings->options);
+        }
+        break;
+    case L2MAC_FLUSH_BY_PORT_VLAN:
+    case L2MAC_FLUSH_BY_TRUNK_VLAN: /* LAG */
+        rc = ops_xp_mac_learning_flush_vlan_intf(ml, (xpsVlan_t)settings->vlan,
+                                                 inftId /* ,flags */);
+        if (rc) {
+            VLOG_ERR_RL(&ml_rl, "%s: interface: %u name %s vlan %d flags %u opt %d",
+                        __FUNCTION__, inftId, settings->port_name,
+                        settings->vlan, settings->flags, settings->options);
+        }
+        break;
+     default:
+        VLOG_ERR("%s: Unknown flush mode %d", __FUNCTION__, settings->options);
+        rc = -1;
+    }
+
+    ops_xp_dev_free(xp_dev);
+
+    return (rc != 0) ? -1 : 0;
 }

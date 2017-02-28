@@ -38,7 +38,6 @@
 struct ofport_xpliant;
 struct group_xpliant;
 struct xp_vlan_mgr;
-struct xp_bond_mgr;
 struct xp_mac_learning;
 struct xp_l3_intf;
 
@@ -51,12 +50,8 @@ struct ofproto_xpliant {
 
     /* Bridging. */
     struct hmap bundles;        /* Contains "struct bundle_xpliant"s. */
-    struct xp_vlan_mgr* vlan_mgr;
-    struct xp_bond_mgr* bond_mgr;
+    struct xp_vlan_mgr *vlan_mgr;
     struct xp_mac_learning *ml;
-    bool has_bonded_bundles;
-    bool lacp_enabled;
-    struct eth_addr sys_mac;
 
     /* Ports */
     struct sset ports;             /* Set of standard port names added to the datapath. */
@@ -144,5 +139,7 @@ struct bundle_xpliant *bundle_lookup(const struct ofproto_xpliant *ofproto,
 xpsInterfaceId_t ops_xp_get_ofport_intf_id(const struct ofport_xpliant *port);
 xpsPort_t ops_xp_get_ofport_number(const struct ofport_xpliant *port);
 struct ofproto_xpliant *ops_xp_ofproto_lookup(const char *name);
+struct ofproto_xpliant *ops_xp_ofproto_get_first(void);
+struct ofproto_xpliant *ops_xp_ofproto_get_next(struct ofproto_xpliant *ofproto);
 
 #endif /* ops-xp-ofproto-provider.h */

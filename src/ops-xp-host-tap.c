@@ -84,8 +84,8 @@ static struct tap_if_entry *tap_get_if_entry_by_if_id(struct tap_info *tap_info,
 static void *tap_listener(void *arg);
 
 static XP_STATUS tap_packet_driver_cb(xpsDevice_t devId, xpsPort_t portNum,
-                                      void *buf, uint16_t buf_size,
-                                      void *userData);
+                                      xpsVlan_t vlan, void *buf,
+                                      uint16_t buf_size, void *userData);
 
 static int tap_init(struct xpliant_dev *xp_dev);
 static void tap_deinit(struct xpliant_dev *xp_dev);
@@ -437,7 +437,7 @@ tap_if_control_id_set(struct xpliant_dev *xp_dev,
         status = xpsInterfaceGetType(xps_if_id, &if_type);
         if (status != XP_NO_ERR) {
             ovs_mutex_unlock(&info->mutex);
-            VLOG_ERR("%s, Failed to get interface type. Error: %d", 
+            VLOG_ERR("%s, Failed to get interface type. Error: %d",
                      __FUNCTION__, status);
             return EPERM;
         }
@@ -607,10 +607,29 @@ tap_listener(void *arg)
     return NULL;
 }
 
+static uint16_t
+xp_get_eth_type(uint8_t *packet, bool *tagged)
+{
+    uint16_t eth_type;
+
+    eth_type = ((uint16_t)packet[XP_ETH_TYPE_OFFSET] << 8) |
+            packet[XP_ETH_TYPE_OFFSET + 1];
+
+    if (eth_type == ETHERTYPE_VLAN) {
+        *tagged = 1;
+        eth_type = ((uint16_t)packet[XP_ETH_TYPE_OFFSET + XP_ETH_VLAN_TAG_LEN] << 8) |
+                packet[XP_ETH_TYPE_OFFSET + XP_ETH_VLAN_TAG_LEN + 1];
+    } else {
+        *tagged = 0;
+    }
+
+    return eth_type;
+}
+
 /* Packet driver callback which sends packets received from host interface
  * to corresponding TAP interfaces. */
 static XP_STATUS
-tap_packet_driver_cb(xpsDevice_t devId, xpsPort_t portNum,
+tap_packet_driver_cb(xpsDevice_t devId, xpsPort_t portNum, xpsVlan_t vlan,
                      void *buf, uint16_t buf_size, void *userData)
 {
     XP_STATUS status;
@@ -620,9 +639,14 @@ tap_packet_driver_cb(xpsDevice_t devId, xpsPort_t portNum,
     xpsInterfaceId_t if_id;
     struct xpliant_dev *dev = (struct xpliant_dev *)userData;
     struct tap_info *info;
+    uint8_t *packet = (uint8_t *)buf;
 
     if (!dev || !dev->host_if_info) {
         return XP_ERR_INVALID_PARAMS;
+    }
+
+    if (portNum == CPU_PORT) {
+        return XP_NO_ERR;
     }
 
     info = (struct tap_info *)dev->host_if_info->data;
@@ -632,6 +656,43 @@ tap_packet_driver_cb(xpsDevice_t devId, xpsPort_t portNum,
         VLOG_ERR("%s, Unable to get interface ID for a port: %u",
                  __FUNCTION__, portNum);
         return status;
+    }
+
+    if (vlan) {
+        bool tagged = false;
+        uint16_t eth_type = xp_get_eth_type((uint8_t *)buf, &tagged);
+
+        if ((eth_type == ETHERTYPE_IP) ||
+            (eth_type == ETHERTYPE_IPV6) ||
+            (eth_type == ETHERTYPE_ARP)) {
+
+            VLOG_DBG("%s, Received L3 packet on a port: %u and vlan: %u",
+                     __FUNCTION__, portNum, vlan);
+
+            /* Handle case when we receive packet from access port (without VLAN tag) */
+            if (!tagged) {
+                memmove(&packet[XP_ETH_TYPE_OFFSET + XP_ETH_VLAN_TAG_LEN],
+                        &packet[XP_ETH_TYPE_OFFSET],
+                        buf_size - XP_ETH_TYPE_OFFSET);
+                buf_size += XP_ETH_VLAN_TAG_LEN;
+
+                packet[XP_ETH_TYPE_OFFSET] = (ETHERTYPE_VLAN >> 8) & 0xFF;
+                packet[XP_ETH_TYPE_OFFSET + 1] = ETHERTYPE_VLAN & 0xFF;
+                packet[XP_ETH_VLAN_TAG_OFFSET] = (vlan >> 8) & 0x0F;
+                packet[XP_ETH_VLAN_TAG_OFFSET + 1]  = vlan & 0xFF;
+                VLOG_DBG("%s, added 802.1q header VID: %d", __FUNCTION__, vlan);
+            }
+
+            /* Set if_id to CPU port number so that L3 or ARP packets will be
+             * forwarded to bridge_normal whereas L2 ones - still to regular
+             * ports. */
+            status = xpsPortGetCPUPortIntfId(devId, &if_id);
+            if (status != XP_NO_ERR) {
+                VLOG_ERR("%s, Unable to get interface ID for CPU port",
+                         __FUNCTION__);
+                return status;
+            }
+        }
     }
 
     ovs_mutex_lock(&info->mutex);

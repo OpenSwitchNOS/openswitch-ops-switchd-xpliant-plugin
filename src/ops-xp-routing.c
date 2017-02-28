@@ -34,10 +34,14 @@
 #include "ops-xp-util.h"
 #include "ops-xp-routing.h"
 #include "ops-xp-vlan.h"
+#include "ops-xp-mac-learning.h"
 #include "unixctl.h"
 #include "openXpsReasonCodeTable.h"
 
 VLOG_DEFINE_THIS_MODULE(xp_routing);
+
+#define XP_L3_HOST_REHASH_LEVEL         4
+#define XP_L3_ROUTE_REHASH_LEVEL        1
 
 typedef struct {
     struct ofproto_xpliant *ofproto;
@@ -63,6 +67,42 @@ route_delete(struct ofproto_xpliant *ofproto, xp_route_entry_t *route);
 static void
 nh_group_delete(struct ofproto_xpliant *ofproto, xp_nh_group_entry_t *nh_group);
 
+static uint32_t
+ops_xp_vlan_mac_hash_calc(xpsVlan_t vid, macAddr_t mac);
+
+int
+ops_xp_l3_init(xpsDevice_t devId)
+{
+    XP_STATUS status;
+
+    status = xpsL3SetIpv4RehashLevel(devId, XP_L3_HOST_REHASH_LEVEL);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("%s: Could not set rehash level for IPv4 host table. "
+                 "Error code: %d\n", __FUNCTION__, status);
+    }
+
+    status = xpsL3SetIpv6RehashLevel(devId, XP_L3_HOST_REHASH_LEVEL);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("%s: Could not set rehash level for IPv6 host table. "
+                 "Error code: %d\n", __FUNCTION__, status);
+    }
+
+    status = xpsL3SetNumRehashLevel(devId, XP_PREFIX_TYPE_IPV4,
+                                    XP_L3_ROUTE_REHASH_LEVEL);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("%s: Could not set rehash level for IPv4 route table. "
+                 "Error code: %d\n", __FUNCTION__, status);
+    }
+
+    status = xpsL3SetNumRehashLevel(devId, XP_PREFIX_TYPE_IPV6,
+                                    XP_L3_ROUTE_REHASH_LEVEL);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("%s: Could not set rehash level for IPv6 route table. "
+                 "Error code: %d\n", __FUNCTION__, status);
+    }
+
+    return 0;
+}
 
 /* Creates and returns a new L3 manager. */
 xp_l3_mgr_t *
@@ -73,6 +113,9 @@ ops_xp_l3_mgr_create(xpsDevice_t devId)
 
     mgr = xzalloc(sizeof *mgr);
 
+    /* Zero is not acceptable as l3 egress id by ops-switchd upper layer code */
+    mgr->next_host_id = 1;
+
     ovs_refcount_init(&mgr->ref_cnt);
     ovs_mutex_init_recursive(&mgr->mutex);
 
@@ -80,8 +123,10 @@ ops_xp_l3_mgr_create(xpsDevice_t devId)
 
     hmap_init(&mgr->route_map);
     hmap_init(&mgr->nh_group_map);
+    hmap_init(&mgr->nh_vlan_mac_map);
     hmap_init(&mgr->host_map);
     hmap_init(&mgr->host_id_map);
+    hmap_init(&mgr->host_vlan_mac_map);
 
     mgr->ecmp_hash = (OFPROTO_ECMP_HASH_SRCPORT | OFPROTO_ECMP_HASH_DSTPORT |
                         OFPROTO_ECMP_HASH_SRCIP | OFPROTO_ECMP_HASH_DSTIP);
@@ -148,6 +193,7 @@ ops_xp_l3_mgr_destroy(struct ofproto_xpliant *ofproto)
             nh_group_delete(ofproto, e);
         }
         hmap_destroy(&mgr->nh_group_map);
+        hmap_destroy(&mgr->nh_vlan_mac_map);
     }
 
     /* Clear and destroy hosts map. */
@@ -160,6 +206,7 @@ ops_xp_l3_mgr_destroy(struct ofproto_xpliant *ofproto)
         }
         hmap_destroy(&mgr->host_map);
         hmap_destroy(&mgr->host_id_map);
+        hmap_destroy(&mgr->host_vlan_mac_map);
     }
 
     ovs_mutex_destroy(&mgr->mutex);
@@ -197,12 +244,17 @@ host_entry_alloc(xp_l3_mgr_t *mgr)
 
     ovs_assert(mgr);
     if (list_is_empty(&mgr->dummy_host_list)) {
-        host = xzalloc(sizeof *host);
-        host->id = mgr->next_host_id++;
+        if (mgr->next_host_id == UINT32_MAX) {
+            host = NULL;
+        } else {
+            host = xzalloc(sizeof *host);
+            host->id = mgr->next_host_id++;
+        }
     } else {
         node = list_pop_front(&mgr->dummy_host_list);
         host = CONTAINER_OF(node, xp_host_entry_t, list_node);
     }
+
     return host;
 }
 
@@ -224,7 +276,7 @@ int
 ops_xp_routing_add_host_entry(struct ofproto_xpliant *ofproto,
                               xpsInterfaceId_t port_intf_id,
                               bool is_ipv6_addr, char *ip_addr,
-                              char *next_hop_mac_addr,
+                              const char *next_hop_mac_addr,
                               xpsInterfaceId_t l3_intf_id,
                               xpsVlan_t vid, bool local, int *l3_egress_id)
 {
@@ -233,6 +285,12 @@ ops_xp_routing_add_host_entry(struct ofproto_xpliant *ofproto,
     uint8_t prefix_len;
     xp_host_entry_t *e;
     xp_l3_mgr_t *l3_mgr;
+    bool l3_vlan = false;
+    bool added_to_hw = true;
+    struct ether_addr ether_mac = { { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 } };
+    macAddr_t nh_mac = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    xpsHashIndexList_t hash_list = { 0, { UINT32_MAX, } };
+    uint32_t i;
     int rc;
 
     ovs_assert(ofproto);
@@ -244,30 +302,54 @@ ops_xp_routing_add_host_entry(struct ofproto_xpliant *ofproto,
              ip_addr, next_hop_mac_addr,
              port_intf_id, l3_intf_id);
 
+    if (!local) {
+        xpsInterfaceType_e if_type;
+
+        status = xpsInterfaceGetType(l3_intf_id, &if_type);
+        if (status != XP_NO_ERR) {
+            VLOG_ERR("%s, Failed to get interface type. Error: %d",
+                     __FUNCTION__, status);
+            return EPERM;
+        }
+
+        /* Convert Next-hop MAC address to XP format */
+        if (next_hop_mac_addr &&
+                (ether_aton_r(next_hop_mac_addr, &ether_mac) != NULL)) {
+            ops_xp_mac_copy_and_reverse(nh_mac, (uint8_t *)&ether_mac);
+        }
+
+        /* For L3 VLAN interfaces need to search for a egress port interface based
+         * on VLAN + Next-hop MAC pair */
+        if (if_type == XPS_VLAN_ROUTER) {
+            struct xp_mac_entry *ml_e;
+
+            l3_vlan = true;
+
+            ovs_rwlock_rdlock(&ofproto->ml->rwlock);
+
+            ml_e = ops_xp_mac_learning_lookup_by_vlan_and_mac(ofproto->ml, vid,
+                                                              nh_mac);
+            if (ml_e) {
+                port_intf_id = ml_e->xps_fdb_entry.intfId;
+            } else {
+                VLOG_WARN("%s, Unresolved host: %s, with mac: %s, "
+                          "VLAN l3intf %u will not be configured "
+                          "in hardware.",
+                         __FUNCTION__, ip_addr, next_hop_mac_addr, l3_intf_id);
+            }
+
+            ovs_rwlock_unlock(&ofproto->ml->rwlock);
+        }
+    }
+
     l3_mgr = ofproto->l3_mgr;
 
     ovs_mutex_lock(&l3_mgr->mutex);
 
     e = host_entry_alloc(l3_mgr);
-
-    if (local) {
-        e->xp_host.nhEntry.reasonCode = XP_ROUTE_RC_HOST_TABLE_HIT;
-    } else {
-        struct ether_addr ether_mac;
-
-        e->xp_host.nhEntry.nextHop.l3InterfaceId = l3_intf_id;
-        e->xp_host.nhEntry.nextHop.egressIntfId = port_intf_id;
-        e->xp_host.nhEntry.serviceInstId = vid;
-        e->xp_host.nhEntry.pktCmd = XP_PKTCMD_FWD;
-
-        if (ether_aton_r(next_hop_mac_addr, &ether_mac) != NULL) {
-            ops_xp_mac_copy_and_reverse(e->xp_host.nhEntry.nextHop.macDa,
-                                        (uint8_t *)&ether_mac);
-            memcpy(e->mac_addr, &ether_mac, ETH_ADDR_LEN);
-        }
-    }
     e->xp_host.nhEntry.propTTL = false;
     e->xp_host.vrfId = ofproto->vrf_id;
+    e->is_ipv6_addr = is_ipv6_addr;
 
     if (is_ipv6_addr) {
         struct in6_addr ipv6_addr;
@@ -301,14 +383,29 @@ ops_xp_routing_add_host_entry(struct ofproto_xpliant *ofproto,
         e->ipv4_dest_addr = ipv4_addr;
     }
 
-    e->is_ipv6_addr = is_ipv6_addr;
-
     if (local) {
+        e->xp_host.nhEntry.reasonCode = XP_ROUTE_RC_HOST_TABLE_HIT;
         status = xpsL3AddIpHostControlEntry(ofproto->xpdev->id, &e->xp_host,
-                                            &hash, &rehash);
+                                            &hash_list);
+        /* Set command to trap(in chache only) so entry will be correctly
+         * displayed in ovs-appctl command output. */
+        e->xp_host.nhEntry.pktCmd = XP_PKTCMD_TRAP;
     } else {
-        status = xpsL3AddIpHostEntry(ofproto->xpdev->id, &e->xp_host,
-                                     &hash, &rehash);
+        memcpy(e->xp_host.nhEntry.nextHop.macDa, nh_mac, ETH_ADDR_LEN);
+        memcpy(e->mac_addr, &ether_mac, ETH_ADDR_LEN);
+        e->xp_host.nhEntry.nextHop.l3InterfaceId = l3_intf_id;
+        e->xp_host.nhEntry.serviceInstId = vid;
+        e->xp_host.nhEntry.nextHop.egressIntfId = port_intf_id;
+        /* Is egress port interface resolved ? */
+        if (port_intf_id == XPS_INTF_INVALID_ID) {
+            e->xp_host.nhEntry.pktCmd = XP_PKTCMD_TRAP;
+            added_to_hw = false;
+        } else {
+            e->xp_host.nhEntry.pktCmd = XP_PKTCMD_FWD;
+
+            status = xpsL3AddIpHostEntry(ofproto->xpdev->id, &e->xp_host,
+                                         &hash_list);
+        }
     }
 
     if (status != XP_NO_ERR) {
@@ -321,24 +418,40 @@ ops_xp_routing_add_host_entry(struct ofproto_xpliant *ofproto,
 
     /* Assign unique immutable Host Entry ID */
     *l3_egress_id = (int)e->id;
+    hmap_insert(&l3_mgr->host_id_map, &e->hmap_id_node, e->id);
 
-    VLOG_DBG("%s: Entry Id %u: "IP_FMT"  "ETH_ADDR_FMT,
+    if (l3_vlan) {
+        uint32_t vlan_mac_hash = \
+            ops_xp_vlan_mac_hash_calc(vid, e->xp_host.nhEntry.nextHop.macDa);
+
+        hmap_insert(&l3_mgr->host_vlan_mac_map, &e->hmap_vlan_mac_node,
+                    vlan_mac_hash);
+    }
+
+    VLOG_DBG("%s: Entry Id %u: "XP_IP_FMT"  "XP_ETH_ADDR_FMT,
              __FUNCTION__, *l3_egress_id,
-             IP_ARGS(e->ipv4_dest_addr.s_addr),
-             ETH_ADDR_BYTES_ARGS(e->xp_host.nhEntry.nextHop.macDa));
+             XP_IP_ARGS(e->ipv4_dest_addr.s_addr),
+             XP_ETH_ADDR_ARGS(e->xp_host.nhEntry.nextHop.macDa));
 
-    if (hash != rehash) {
-        struct hmap_node *node;
-
-        /* Update entry index in the host table. */
-        node = hmap_first_with_hash(&l3_mgr->host_map, hash);
-        if (node != NULL) {
-            hmap_remove(&l3_mgr->host_map, node);
-            hmap_insert(&l3_mgr->host_map, node, rehash);
+    if (!added_to_hw) {
+        ovs_mutex_unlock(&l3_mgr->mutex);
+        return 0;
+    }
+    /* Check for the rehashing */
+    if (hash_list.size > 1) {
+        /* Rehasing occurred - move an old entries to a new place. */
+        for (i = hash_list.size - 1; i > 0; i--) {
+            struct hmap_node *node;
+            /* Update entry index in the host table. */
+            node = hmap_first_with_hash(&l3_mgr->host_map,
+                                        hash_list.index[i - 1]);
+            if (node) {
+                hmap_remove(&l3_mgr->host_map, node);
+                hmap_insert(&l3_mgr->host_map, node, hash_list.index[i]);
+            }
         }
     }
-    hmap_insert(&l3_mgr->host_map, &e->hmap_node, hash);
-    hmap_insert(&l3_mgr->host_id_map, &e->hmap_id_node, e->id);
+    hmap_insert(&l3_mgr->host_map, &e->hmap_node, hash_list.index[0]);
 
     ovs_mutex_unlock(&l3_mgr->mutex);
 
@@ -350,11 +463,9 @@ ops_xp_routing_delete_host_entry(struct ofproto_xpliant *ofproto,
                                  int *l3_egress_id)
 {
     XP_STATUS status;
-    xpIpPrefixType_t host_entry_type;
     struct hmap_node *node;
     xp_l3_mgr_t *l3_mgr;
     xp_host_entry_t *e;
-    int index;
 
     ovs_assert(ofproto);
     ovs_assert(ofproto->xpdev);
@@ -372,20 +483,30 @@ ops_xp_routing_delete_host_entry(struct ofproto_xpliant *ofproto,
     }
     hmap_remove(&l3_mgr->host_id_map, node);
 
-    /* Retrieve Host Entry's HW hash value */
+
     e = CONTAINER_OF(node, xp_host_entry_t, hmap_id_node);
-    index = (int)hmap_node_hash(&e->hmap_node);
-    if (hmap_contains(&l3_mgr->host_map, &e->hmap_node)) {
-        hmap_remove(&l3_mgr->host_map, &e->hmap_node);
+
+    if (hmap_contains(&ofproto->l3_mgr->host_vlan_mac_map,
+                      &e->hmap_vlan_mac_node)) {
+        hmap_remove(&ofproto->l3_mgr->host_vlan_mac_map,
+                    &e->hmap_vlan_mac_node);
     }
 
-    host_entry_type = e->is_ipv6_addr ? XP_PREFIX_TYPE_IPV6 : XP_PREFIX_TYPE_IPV4;
+    if (hmap_contains(&l3_mgr->host_map, &e->hmap_node)) {
+        /* Retrieve Host Entry's HW hash value */
+        uint32_t index = (uint32_t)hmap_node_hash(&e->hmap_node);
+        xpIpPrefixType_t host_entry_type = \
+            e->is_ipv6_addr ? XP_PREFIX_TYPE_IPV6 : XP_PREFIX_TYPE_IPV4;
+
+        hmap_remove(&l3_mgr->host_map, &e->hmap_node);
+
+        /* Remove Host Entry from the HW */
+        status = xpsL3RemoveIpHostEntryByIndex(ofproto->xpdev->id, index,
+                                               host_entry_type);
+    }
 
     host_entry_free(l3_mgr, e);
 
-    /* Remove Host Entry from the HW */
-    status = xpsL3RemoveIpHostEntryByIndex(ofproto->xpdev->id, (uint32_t)index,
-                                           host_entry_type);
     ovs_mutex_unlock(&l3_mgr->mutex);
 
     if (status != XP_NO_ERR) {
@@ -473,6 +594,12 @@ nh_group_delete(struct ofproto_xpliant *ofproto, xp_nh_group_entry_t *nh_group)
     }
 
     HMAP_FOR_EACH(e, hmap_node, &nh_group->nh_map) {
+        if (hmap_contains(&ofproto->l3_mgr->nh_vlan_mac_map,
+                          &e->hmap_vlan_mac_node)) {
+            hmap_remove(&ofproto->l3_mgr->nh_vlan_mac_map,
+                        &e->hmap_vlan_mac_node);
+        }
+
         status = xpsL3ClearRouteNextHop(ofproto->xpdev->id, e->xp_nh_id);
         if (status != XP_NO_ERR) {
             VLOG_WARN("Could not clear NH on hardware. Status: %d", status);
@@ -561,6 +688,8 @@ nh_update(xp_l3_mgr_t *mgr, xp_nh_entry_t *xp_nh,
 
     if (nh->state == OFPROTO_NH_RESOLVED) {
         xp_host_entry_t *host_entry;
+        xpsInterfaceType_e if_type;
+        XP_STATUS status;
 
         /* Retrieve L3 Host Entry */
         node = hmap_first_with_hash(&mgr->host_id_map, (size_t)nh->l3_egress_id);
@@ -577,8 +706,22 @@ nh_update(xp_l3_mgr_t *mgr, xp_nh_entry_t *xp_nh,
         xp_nh->xp_nh.nextHop.egressIntfId = host_entry->xp_host.nhEntry.nextHop.egressIntfId;
         xp_nh->xp_nh.nextHop.l3InterfaceId = host_entry->xp_host.nhEntry.nextHop.l3InterfaceId;
         xp_nh->xp_nh.serviceInstId = host_entry->xp_host.nhEntry.serviceInstId;
-        xp_nh->xp_nh.pktCmd = XP_PKTCMD_FWD;
+        xp_nh->xp_nh.pktCmd = host_entry->xp_host.nhEntry.pktCmd;
 
+        status = xpsInterfaceGetType(xp_nh->xp_nh.nextHop.l3InterfaceId,
+                                     &if_type);
+        if (status != XP_NO_ERR) {
+            VLOG_ERR("%s, Failed to get interface type. Error: %d",
+                     __FUNCTION__, status);
+
+        } else if (if_type == XPS_VLAN_ROUTER) {
+            uint32_t hash = \
+                ops_xp_vlan_mac_hash_calc(xp_nh->xp_nh.serviceInstId,
+                                          xp_nh->xp_nh.nextHop.macDa);
+
+            hmap_insert(&mgr->nh_vlan_mac_map,
+                        &xp_nh->hmap_vlan_mac_node, hash);
+        }
     } else if (xp_nh->xp_nh.pktCmd != XP_PKTCMD_FWD) {
         /* Entry is not resolved. Trap packet to CPU for resolution. */
         xp_nh->xp_nh.pktCmd = XP_PKTCMD_TRAP;
@@ -1353,19 +1496,10 @@ l3_iface_mac_set(struct ofproto_xpliant *ofproto, xpsInterfaceId_t l3_intf_id,
         return EFAULT;
     }
 
-    if (vid) {
-        status = xpsL3AddIngressRouterVlanMac(ofproto->xpdev->id, vid, xp_mac);
-        if (status != XP_NO_ERR) {
-            VLOG_ERR("Failed to set ingress router MAC for VLAN %u. "
-                     "Error: %d", vid, status);
-            return EFAULT;
-        }
-    } else {
-        status = xpsL3AddIngressRouterMac(ofproto->xpdev->id, xp_mac);
-        if (status != XP_NO_ERR) {
-            VLOG_ERR("Failed to set ingress router MAC. Error: %d", status);
-            return EFAULT;
-        }
+    status = xpsL3AddIngressRouterMac(ofproto->xpdev->id, xp_mac);
+    if (status != XP_NO_ERR) {
+        VLOG_ERR("Failed to set ingress router MAC. Error: %d", status);
+        return EFAULT;
     }
 
     return 0;
@@ -1386,10 +1520,10 @@ ops_xp_routing_disable_l3_interface(struct ofproto_xpliant *ofproto,
     VLOG_INFO("%s: L3 interface ID 0x%08X, VLAN %u",
               __FUNCTION__, l3_intf->l3_intf_id, l3_intf->vlan_id);
 
-    status = xpsInterfaceGetType(l3_intf->intf_id, &l3_intf_type);
+    status = xpsInterfaceGetType(l3_intf->l3_intf_id, &l3_intf_type);
     if (status != XP_NO_ERR) {
         VLOG_WARN("Failed to get interface type for interface %u",
-                  l3_intf->intf_id);
+                  l3_intf->l3_intf_id);
     }
 
     /* Remove interface ID to name mapping in xpdev. */
@@ -1448,6 +1582,9 @@ ops_xp_routing_disable_l3_interface(struct ofproto_xpliant *ofproto,
             VLOG_ERR("Failed to set ARP forward action for VLAN %u on Device %d",
                      l3_intf->vlan_id, ofproto->xpdev->id);
         }
+
+        ops_xp_vlan_set_l3_if_id(ofproto->xpdev->vlan_mgr, l3_intf->vlan_id,
+                                 XPS_INTF_INVALID_ID);
         break;
     default:
         /* do nothing, just free control structure */
@@ -1471,10 +1608,10 @@ ops_xp_routing_update_l3_interface(struct ofproto_xpliant *ofproto,
     VLOG_INFO("%s: L3 interface ID 0x%08X, VLAN %u",
               __FUNCTION__, l3_intf->l3_intf_id, l3_intf->vlan_id);
 
-    status = xpsInterfaceGetType(l3_intf->intf_id, &l3_intf_type);
+    status = xpsInterfaceGetType(l3_intf->l3_intf_id, &l3_intf_type);
     if (status != XP_NO_ERR) {
         VLOG_WARN("Failed to get interface type for interface %u",
-                  l3_intf->intf_id);
+                  l3_intf->l3_intf_id);
     }
 
     switch (l3_intf_type) {
@@ -1829,9 +1966,124 @@ ops_xp_routing_enable_l3_vlan_interface(struct ofproto_xpliant *ofproto,
                               l3_intf->l3_intf_id,
                               if_name, 0);
 
+    ops_xp_vlan_set_l3_if_id(ofproto->xpdev->vlan_mgr, vid,
+                             l3_intf->l3_intf_id);
+
     VLOG_DBG("%s: L3 interface ID 0x%08X", __FUNCTION__, l3_intf->l3_intf_id);
 
     return l3_intf;
+}
+
+static void
+on_mac_resolved(struct ofproto_xpliant *ofproto, xpsVlan_t vid,
+                xpsInterfaceId_t vlan_l3_if_id, macAddr_t mac,
+                xpsInterfaceId_t if_id)
+{
+    if (ofproto && ofproto->l3_mgr) {
+        xp_host_entry_t *host = NULL;
+        xp_nh_entry_t *nh = NULL;
+        XP_STATUS status;
+        uint32_t vlan_mac_hash = ops_xp_vlan_mac_hash_calc(vid, mac);
+
+        ovs_mutex_lock(&ofproto->l3_mgr->mutex);
+
+        /* Update egress interface in hosts. */
+        HMAP_FOR_EACH_WITH_HASH(host, hmap_vlan_mac_node, vlan_mac_hash,
+                                &ofproto->l3_mgr->host_vlan_mac_map) {
+            if ((host->xp_host.nhEntry.nextHop.l3InterfaceId == vlan_l3_if_id) &&
+                (host->xp_host.nhEntry.nextHop.egressIntfId != if_id) &&
+                (memcmp(host->xp_host.nhEntry.nextHop.macDa,
+                        mac, XP_MAC_ADDR_LEN) == 0)) {
+                host->xp_host.nhEntry.nextHop.egressIntfId = if_id;
+
+                /* Host with TRAP command wasn't configured on HW yet,
+                 * so need to do this here. */
+                if (host->xp_host.nhEntry.pktCmd == XP_PKTCMD_TRAP) {
+                    xpsHashIndexList_t hash_list = { 0, { UINT32_MAX, } };
+                    uint32_t i;
+
+                    host->xp_host.nhEntry.pktCmd = XP_PKTCMD_FWD;
+
+                    status = xpsL3AddIpHostEntry(ofproto->xpdev->id,
+                                                 &host->xp_host, &hash_list);
+                    if (status != XP_NO_ERR) {
+                        VLOG_ERR("%s, Could not add host entry: %d on HW, "
+                                 "Error: %d", __FUNCTION__, host->id, status);
+                        continue;
+                    }
+                    /* Check for the rehashing */
+                    if (hash_list.size > 1) {
+                        /* Rehasing occurred - move an old entries to a new place. */
+                        for (i = hash_list.size - 1; i > 0; i--) {
+                            struct hmap_node *node;
+                            /* Update entry index in the host table. */
+                            node = hmap_first_with_hash(&ofproto->l3_mgr->host_map,
+                                                        hash_list.index[i - 1]);
+                            if (node) {
+                                hmap_remove(&ofproto->l3_mgr->host_map, node);
+                                hmap_insert(&ofproto->l3_mgr->host_map, node,
+                                            hash_list.index[i]);
+                            }
+                        }
+                    }
+                    hmap_insert(&ofproto->l3_mgr->host_map,
+                                &host->hmap_node, hash_list.index[0]);
+
+                } else {
+                    uint32_t hash = (uint32_t)hmap_node_hash(&host->hmap_node);
+
+                    status = xpsL3UpdateIpHostEntryByIndex(ofproto->xpdev->id,
+                                                           hash, &host->xp_host);
+                    if (status != XP_NO_ERR) {
+                        VLOG_ERR("%s, Could not update host entry: %d on HW, "
+                                 "Error: %d", __FUNCTION__, host->id, status);
+                    }
+                }
+            }
+        }
+
+        /* Update egress interface in next hop groups. */
+        HMAP_FOR_EACH_WITH_HASH(nh, hmap_vlan_mac_node, vlan_mac_hash,
+                                &ofproto->l3_mgr->nh_vlan_mac_map) {
+            if ((nh->xp_nh.nextHop.l3InterfaceId == vlan_l3_if_id) &&
+                (nh->xp_nh.nextHop.egressIntfId != if_id) &&
+                (memcmp(nh->xp_nh.nextHop.macDa, mac, XP_MAC_ADDR_LEN) == 0)) {
+
+                nh->xp_nh.nextHop.egressIntfId = if_id;
+                nh->xp_nh.pktCmd = XP_PKTCMD_FWD;
+
+                status = xpsL3SetRouteNextHop(ofproto->xpdev->id,
+                                              nh->xp_nh_id, &nh->xp_nh);
+                if (status != XP_NO_ERR) {
+                    VLOG_ERR("%s, Could not update NH: %s, Error: %d",
+                             __FUNCTION__, nh->id, status);
+                }
+            }
+        }
+
+        ovs_mutex_unlock(&ofproto->l3_mgr->mutex);
+    }
+}
+
+void
+ops_xp_routing_on_mac_resolved(struct xpliant_dev *xp_dev, xpsVlan_t vid,
+                               macAddr_t mac, xpsInterfaceId_t if_id)
+{
+    struct ofproto_xpliant *ofproto;
+    xpsInterfaceId_t vlan_l3_if_id;
+
+    ovs_assert(xp_dev);
+
+    vlan_l3_if_id = ops_xp_vlan_get_l3_if_id(xp_dev->vlan_mgr, vid);
+    if (vlan_l3_if_id == XPS_INTF_INVALID_ID) {
+        return;
+    }
+
+    ofproto = ops_xp_ofproto_get_first();
+    while (ofproto) {
+        on_mac_resolved(ofproto, vid, vlan_l3_if_id, mac, if_id);
+        ofproto = ops_xp_ofproto_get_next(ofproto);
+    }
 }
 
 const char *
@@ -1844,6 +2096,16 @@ ops_xp_pkt_cmd_to_string(xpPktCmd_e cmd)
     case XP_PKTCMD_FWD_MIRROR: return "mirror";
     }
     return "-";
+}
+
+static uint32_t
+ops_xp_vlan_mac_hash_calc(xpsVlan_t vid, macAddr_t mac)
+{
+    struct eth_addr mac_eth;
+
+    memcpy(mac_eth.ea, mac, sizeof(mac_eth.ea));
+
+    return hash_uint64(eth_addr_vlan_to_uint64(mac_eth, vid));
 }
 
 static void
@@ -1957,8 +2219,8 @@ l3_mgr_show_hosts(xp_l3_mgr_t *mgr, struct ds *d_str)
 
     ovs_mutex_lock(&mgr->mutex);
 
-    /* Dump static routes. */
-    HMAP_FOR_EACH(e, hmap_node, &mgr->host_map) {
+    /* Dump hosts. */
+    HMAP_FOR_EACH(e, hmap_id_node, &mgr->host_id_map) {
         int af;
         uint8_t ip[sizeof(ipv6Addr_t)];
         char ip_str[128];

@@ -54,6 +54,7 @@ struct xp_vlan_member_entry {
  * to configure VLAN in software as well as in the hardware. */
 struct xp_vlan {
     bool is_existing;           /* Flag signalizing VLAN is existing. */
+    xpsInterfaceId_t l3_if;     /* VLAN L3 interface ID. */
     struct hmap members_table;  /* Table of members of this vlan. */
     struct hmap vxlan_vnis;     /* Table of VxLAN VNIs */
     struct hmap geneve_vnis;    /* Table of Geneve VNIs */
@@ -81,6 +82,14 @@ int ops_xp_vlan_create(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id)
 
 int ops_xp_vlan_remove(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id)
     OVS_REQ_WRLOCK(mgr->rwlock);
+
+int ops_xp_vlan_set_l3_if_id(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id,
+                             xpsInterfaceId_t l3_if_id)
+    OVS_REQ_WRLOCK(mgr->rwlock);
+
+xpsInterfaceId_t ops_xp_vlan_get_l3_if_id(struct xp_vlan_mgr *mgr,
+                                          xpsVlan_t vlan_id)
+    OVS_REQ_RDLOCK(mgr->rwlock);
 
 int ops_xp_vlan_enable_flooding(struct xp_vlan_mgr *mgr, xpsVlan_t vlan_id,
                                 bool flooding)
